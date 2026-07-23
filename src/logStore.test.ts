@@ -70,6 +70,77 @@ describe('LogStore', () => {
     expect(store.getExportContent()).toBe(`${lines[2]}\n`)
   })
 
+  it('queries indexed fields before applying text filters', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+
+    store.appendRawBatch({
+      sessionId: 'session-a',
+      deviceSerial: 'device-a',
+      lines: lines.slice(0, 2),
+    })
+    store.appendRawBatch({
+      sessionId: 'session-b',
+      deviceSerial: 'device-b',
+      lines: lines.slice(2),
+    })
+
+    store.setQuery({
+      tags: ['crashtag'],
+      pids: ['1619'],
+      sessions: ['SESSION-B'],
+      devices: ['DEVICE-B'],
+      crashOnly: true,
+      includeText: 'fatal',
+    })
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.filteredCount).toBe(1)
+    expect(snapshot.visibleEntries[0]).toMatchObject({
+      sessionId: 'session-b',
+      deviceSerial: 'device-b',
+      tag: 'CrashTag',
+      isCrash: true,
+    })
+  })
+
+  it('supports exclude text and time ranges in queries', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+    const infoEntry = store.getSnapshot().visibleEntries[1]
+    expect(infoEntry?.timestampEpochMs).toBeTypeOf('number')
+
+    store.setQuery({
+      includeText: 'message',
+      excludeText: 'debug',
+      startEpochMs: infoEntry.timestampEpochMs,
+    })
+
+    expect(store.getSnapshot().visibleEntries.map((entry) => entry.level)).toEqual(['I'])
+  })
+
+  it('does not return stale indexed entries after capacity eviction', () => {
+    const store = new LogStore({ capacity: 2, displayLimit: 10 })
+
+    store.appendRawBatch({ sessionId: 's1', lines: lines.slice(0, 2) })
+    store.appendRawBatch({ sessionId: 's1', lines: lines.slice(2, 4) })
+    store.setQuery({ tags: ['demotag'] })
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.totalCount).toBe(2)
+    expect(snapshot.droppedCount).toBe(2)
+    expect(snapshot.filteredCount).toBe(0)
+  })
+
+  it('ignores invalid time range values', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+    store.setQuery({ startEpochMs: Number.NaN, endEpochMs: Number.POSITIVE_INFINITY })
+
+    expect(store.getSnapshot().filteredCount).toBe(4)
+  })
+
   it('returns a stable snapshot object until data or filters change', () => {
     const store = new LogStore({ capacity: 10, displayLimit: 10 })
 
