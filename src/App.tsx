@@ -484,6 +484,17 @@ function App() {
         </div>
 
         <section className="sidebar-section">
+          <p className="section-label">外观</p>
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+          >
+            {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+            {theme === 'light' ? '切换暗色' : '切换亮色'}
+          </button>
+        </section>
+
+        <section className="sidebar-section">
           <div className="section-heading">
             <p className="section-label">设备</p>
             <button
@@ -644,10 +655,6 @@ function App() {
             <button disabled={logSnapshot.filteredCount === 0 || isExporting} onClick={handleExportLogs}>
               <Download size={16} />
               {isExporting ? '导出中' : '导出'}
-            </button>
-            <button onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}>
-              {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
-              {theme === 'light' ? '暗色' : '亮色'}
             </button>
           </div>
         </header>

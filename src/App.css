@@ -107,6 +107,12 @@
   color: var(--color-text);
 }
 
+.theme-toggle {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
