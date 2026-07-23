@@ -120,6 +120,54 @@ describe('LogStore', () => {
     expect(store.getSnapshot().visibleEntries.map((entry) => entry.level)).toEqual(['I'])
   })
 
+  it('supports match case, whole word, and regex search filters', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+
+    store.setQuery({
+      includeText: 'fatal',
+      searchOptions: { matchCase: true },
+    })
+    expect(store.getSnapshot().filteredCount).toBe(0)
+
+    store.setQuery({
+      includeText: 'FATAL',
+      searchOptions: { matchCase: true },
+    })
+    expect(store.getSnapshot().visibleEntries.map((entry) => entry.tag)).toEqual(['CrashTag'])
+
+    store.setQuery({
+      includeText: 'mess',
+      searchOptions: { wholeWords: true },
+    })
+    expect(store.getSnapshot().filteredCount).toBe(0)
+
+    store.setQuery({
+      includeText: 'message',
+      searchOptions: { wholeWords: true },
+    })
+    expect(store.getSnapshot().visibleEntries.map((entry) => entry.level)).toEqual(['D', 'I'])
+
+    store.setQuery({
+      includeText: 'debug|info',
+      searchOptions: { regex: true },
+    })
+    expect(store.getSnapshot().visibleEntries.map((entry) => entry.level)).toEqual(['D', 'I'])
+  })
+
+  it('returns no search results for invalid regex filters', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+    store.setQuery({
+      includeText: '[',
+      searchOptions: { regex: true },
+    })
+
+    expect(store.getSnapshot().filteredCount).toBe(0)
+  })
+
   it('does not return stale indexed entries after capacity eviction', () => {
     const store = new LogStore({ capacity: 2, displayLimit: 10 })
 

@@ -1,4 +1,11 @@
 import { parseLogcatLine } from './logcat'
+import {
+  compileSearchMatcher,
+  matchesSearchText,
+  normalizeSearchOptions,
+  type CompiledSearchMatcher,
+  type LogSearchOptions,
+} from './search'
 import type { LogEntry, LogLevel } from './types'
 
 export type LevelFilter = 'all' | LogLevel
@@ -12,6 +19,7 @@ export interface LogQuery {
   levels?: LogLevel[]
   includeText?: string
   excludeText?: string
+  searchOptions?: Partial<LogSearchOptions>
   tags?: string[]
   pids?: string[]
   tids?: string[]
@@ -57,6 +65,9 @@ const EMPTY_QUERY: NormalizedLogQuery = {
   levels: [],
   includeText: '',
   excludeText: '',
+  searchOptions: normalizeSearchOptions(),
+  includeMatcher: compileSearchMatcher('', normalizeSearchOptions()),
+  excludeMatcher: compileSearchMatcher('', normalizeSearchOptions()),
   tags: [],
   pids: [],
   tids: [],
@@ -69,6 +80,9 @@ interface NormalizedLogQuery {
   levels: LogLevel[]
   includeText: string
   excludeText: string
+  searchOptions: LogSearchOptions
+  includeMatcher: CompiledSearchMatcher
+  excludeMatcher: CompiledSearchMatcher
   tags: string[]
   pids: string[]
   tids: string[]
@@ -135,10 +149,17 @@ function normalizeEpoch(value: number | undefined) {
 }
 
 function normalizeQuery(query: Partial<LogQuery>): NormalizedLogQuery {
+  const searchOptions = normalizeSearchOptions(query.searchOptions)
+  const includeText = query.includeText?.trim() ?? ''
+  const excludeText = query.excludeText?.trim() ?? ''
+
   return {
     levels: normalizeLevels(query.levels),
-    includeText: query.includeText?.trim().toLowerCase() ?? '',
-    excludeText: query.excludeText?.trim().toLowerCase() ?? '',
+    includeText,
+    excludeText,
+    searchOptions,
+    includeMatcher: compileSearchMatcher(includeText, searchOptions),
+    excludeMatcher: compileSearchMatcher(excludeText, searchOptions),
     tags: normalizeList(query.tags),
     pids: normalizeList(query.pids),
     tids: normalizeList(query.tids),
@@ -151,7 +172,20 @@ function normalizeQuery(query: Partial<LogQuery>): NormalizedLogQuery {
 }
 
 function queryKey(query: NormalizedLogQuery) {
-  return JSON.stringify(query)
+  return JSON.stringify({
+    levels: query.levels,
+    includeText: query.includeText,
+    excludeText: query.excludeText,
+    searchOptions: query.searchOptions,
+    tags: query.tags,
+    pids: query.pids,
+    tids: query.tids,
+    sessions: query.sessions,
+    devices: query.devices,
+    crashOnly: query.crashOnly,
+    startEpochMs: query.startEpochMs,
+    endEpochMs: query.endEpochMs,
+  })
 }
 
 function queryFromFilter(filter: Partial<LogFilter>): NormalizedLogQuery {
@@ -422,10 +456,16 @@ export class LogStore {
     ) {
       return false
     }
-    if (query.includeText && !entry.searchText.includes(query.includeText)) {
+    if (
+      query.includeText &&
+      !matchesSearchText(entry.raw, query.includeMatcher, entry.searchText)
+    ) {
       return false
     }
-    if (query.excludeText && entry.searchText.includes(query.excludeText)) {
+    if (
+      query.excludeText &&
+      matchesSearchText(entry.raw, query.excludeMatcher, entry.searchText)
+    ) {
       return false
     }
     return true

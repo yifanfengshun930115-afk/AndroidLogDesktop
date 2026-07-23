@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpToLine,
+  CaseSensitive,
   CheckCircle2,
   Columns3,
   Download,
@@ -13,12 +14,14 @@ import {
   Play,
   Plus,
   RefreshCcw,
+  Regex,
   RotateCcw,
   Search,
   Sun,
   Tags,
   Trash2,
   Usb,
+  WholeWord,
   WrapText,
   X,
 } from 'lucide-react'
@@ -43,6 +46,12 @@ import {
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
 import { LogStore, logStore } from './logStore'
+import {
+  compileSearchMatcher,
+  findSearchMatchRanges,
+  type CompiledSearchMatcher,
+  type LogSearchOptions,
+} from './search'
 import type {
   AdbDevice,
   AdbInfo,
@@ -64,6 +73,7 @@ interface LogTab {
   selectedTags: string[]
   selectedPackages: string[]
   visibleLogFields: LogField[]
+  searchOptions: LogSearchOptions
   processes: AdbProcessInfo[]
   processError: string
   loadingProcesses: boolean
@@ -97,6 +107,11 @@ const LOG_FIELD_OPTIONS: Array<{ value: LogField; label: string; required?: bool
 ]
 
 const DEFAULT_LOG_FIELDS: LogField[] = LOG_FIELD_OPTIONS.map((option) => option.value)
+const DEFAULT_SEARCH_OPTIONS: LogSearchOptions = {
+  matchCase: false,
+  wholeWords: false,
+  regex: false,
+}
 
 const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWidth: number }> = {
   time: { nowrap: '150px', wrap: '150px', minWidth: 150 },
@@ -119,6 +134,7 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     selectedTags: [],
     selectedPackages: [],
     visibleLogFields: [...DEFAULT_LOG_FIELDS],
+    searchOptions: { ...DEFAULT_SEARCH_OPTIONS },
     processes: [],
     processError: '',
     loadingProcesses: false,
@@ -212,6 +228,43 @@ function buildLogMinWidth(fields: LogField[], softWrap: boolean) {
   return `${Math.max(minWidth, 260)}px`
 }
 
+function HighlightedText({
+  className,
+  matcher,
+  text,
+}: {
+  className?: string
+  matcher: CompiledSearchMatcher
+  text: string
+}) {
+  const ranges = findSearchMatchRanges(text, matcher, 100)
+  if (ranges.length === 0) {
+    return <span className={className}>{text}</span>
+  }
+
+  const parts = []
+  let cursor = 0
+  for (const range of ranges) {
+    if (range.start < cursor) {
+      continue
+    }
+    if (range.start > cursor) {
+      parts.push(text.slice(cursor, range.start))
+    }
+    parts.push(
+      <mark className="log-highlight" key={`${range.start}-${range.end}`}>
+        {text.slice(range.start, range.end)}
+      </mark>,
+    )
+    cursor = range.end
+  }
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor))
+  }
+
+  return <span className={className}>{parts}</span>
+}
+
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
@@ -264,6 +317,10 @@ function App() {
   const packages = packageOptions(activeTab.processes)
   const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
   const visibleTags = filterTextOptions(logSnapshot.tagOptions, tagSearch)
+  const activeSearchMatcher = useMemo(
+    () => compileSearchMatcher(activeTab.searchText, activeTab.searchOptions),
+    [activeTab.searchOptions, activeTab.searchText],
+  )
   const logLayoutStyle = useMemo(
     () =>
       ({
@@ -562,6 +619,19 @@ function App() {
     [updateActiveTab],
   )
 
+  const toggleSearchOption = useCallback(
+    (option: keyof LogSearchOptions) => {
+      updateActiveTab((tab) => ({
+        ...tab,
+        searchOptions: {
+          ...tab.searchOptions,
+          [option]: !tab.searchOptions[option],
+        },
+      }))
+    },
+    [updateActiveTab],
+  )
+
   const addTab = useCallback(() => {
     const nextIndex = nextTabIndexRef.current
     nextTabIndexRef.current += 1
@@ -614,11 +684,13 @@ function App() {
     activeTab.store.setQuery({
       levels: activeTab.selectedLevels,
       includeText: activeTab.searchText,
+      searchOptions: activeTab.searchOptions,
       tags: activeTab.selectedTags,
       pids: packagePids(activeTab.processes, activeTab.selectedPackages),
     })
   }, [
     activeTab.processes,
+    activeTab.searchOptions,
     activeTab.searchText,
     activeTab.selectedPackages,
     activeTab.selectedLevels,
@@ -1142,7 +1214,10 @@ function App() {
               </div>
             ) : null}
           </div>
-          <label className="search-field">
+          <div
+            className={`search-field log-search-field ${activeSearchMatcher.error ? 'invalid' : ''}`}
+            title={activeSearchMatcher.error ? `Regex 无效：${activeSearchMatcher.error}` : undefined}
+          >
             <Search size={16} />
             <input
               onChange={(event) =>
@@ -1151,7 +1226,38 @@ function App() {
               placeholder="搜索日志内容"
               value={activeTab.searchText}
             />
-          </label>
+            <div className="search-option-group" aria-label="搜索选项">
+              <button
+                aria-label="Match Case"
+                aria-pressed={activeTab.searchOptions.matchCase}
+                className={`search-option-button ${activeTab.searchOptions.matchCase ? 'active-toggle' : ''}`}
+                onClick={() => toggleSearchOption('matchCase')}
+                title="Match Case"
+              >
+                <CaseSensitive size={15} />
+              </button>
+              <button
+                aria-label="Words"
+                aria-pressed={activeTab.searchOptions.wholeWords}
+                className={`search-option-button ${activeTab.searchOptions.wholeWords ? 'active-toggle' : ''}`}
+                onClick={() => toggleSearchOption('wholeWords')}
+                title="Words"
+              >
+                <WholeWord size={15} />
+              </button>
+              <button
+                aria-label="Regex"
+                aria-pressed={activeTab.searchOptions.regex}
+                className={`search-option-button ${activeTab.searchOptions.regex ? 'active-toggle' : ''} ${
+                  activeSearchMatcher.error ? 'invalid' : ''
+                }`}
+                onClick={() => toggleSearchOption('regex')}
+                title={activeSearchMatcher.error ? `Regex 无效：${activeSearchMatcher.error}` : 'Regex'}
+              >
+                <Regex size={15} />
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
@@ -1170,9 +1276,12 @@ function App() {
                   {activeTab.visibleLogFields.map((field) => {
                     if (field === 'time') {
                       return (
-                        <span className="mono muted" key={field}>
-                          {entry.timestamp || '-'}
-                        </span>
+                        <HighlightedText
+                          className="mono muted"
+                          key={field}
+                          matcher={activeSearchMatcher}
+                          text={entry.timestamp || '-'}
+                        />
                       )
                     }
                     if (field === 'level') {
@@ -1186,22 +1295,31 @@ function App() {
                     }
                     if (field === 'process') {
                       return (
-                        <span className="mono muted" key={field}>
-                          {entry.pid || '-'}
-                        </span>
+                        <HighlightedText
+                          className="mono muted"
+                          key={field}
+                          matcher={activeSearchMatcher}
+                          text={entry.pid || '-'}
+                        />
                       )
                     }
                     if (field === 'tag') {
                       return (
-                        <span className="log-tag" key={field}>
-                          {entry.tag || '-'}
-                        </span>
+                        <HighlightedText
+                          className="log-tag"
+                          key={field}
+                          matcher={activeSearchMatcher}
+                          text={entry.tag || '-'}
+                        />
                       )
                     }
                     return (
-                      <span className="log-message" key={field}>
-                        {entry.message}
-                      </span>
+                      <HighlightedText
+                        className="log-message"
+                        key={field}
+                        matcher={activeSearchMatcher}
+                        text={entry.message}
+                      />
                     )
                   })}
                 </div>
