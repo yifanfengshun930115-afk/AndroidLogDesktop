@@ -15,4 +15,5 @@ npm run dev
 npm run lint
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
+npm run tauri:build -- --debug
 ```

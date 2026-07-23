@@ -21,3 +21,33 @@ export interface AdbCommandResult {
   devices?: AdbDevice[]
   adb?: AdbInfo
 }
+
+export type LogLevel = 'V' | 'D' | 'I' | 'W' | 'E' | 'F' | '?'
+
+export interface LogcatSessionInfo {
+  sessionId: string
+  serial: string
+  running: boolean
+}
+
+export interface LogcatBatchPayload {
+  sessionId: string
+  lines: string[]
+}
+
+export interface LogcatMessagePayload {
+  sessionId: string
+  message: string
+}
+
+export interface LogEntry {
+  id: number
+  sessionId: string
+  timestamp: string
+  pid: string
+  tid: string
+  level: LogLevel
+  tag: string
+  message: string
+  raw: string
+}

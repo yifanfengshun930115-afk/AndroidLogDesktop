@@ -48,6 +48,20 @@
   gap: 8px;
 }
 
+.sidebar-section.metrics div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 6px;
+  background: #f4f6f8;
+  color: #687386;
+  padding: 8px 10px;
+}
+
+.sidebar-section.metrics strong {
+  color: #172033;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
@@ -218,6 +232,25 @@
   padding: 0 12px;
 }
 
+.search-field {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #ccd4df;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #687386;
+  padding: 0 12px;
+}
+
+.search-field input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  padding: 0;
+}
+
 .log-panel {
   display: flex;
   min-height: 0;
@@ -231,7 +264,7 @@
 
 .log-header {
   display: grid;
-  grid-template-columns: 150px 80px 80px 180px minmax(280px, 1fr);
+  grid-template-columns: 150px 88px 112px 180px minmax(280px, 1fr);
   border-bottom: 1px solid #d9dee7;
   background: #f9fafc;
   color: #687386;
@@ -241,6 +274,94 @@
 
 .log-header span {
   padding: 10px 12px;
+}
+
+.log-list {
+  flex: 1;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 150px 88px 112px 180px minmax(280px, 1fr);
+  min-height: 32px;
+  align-items: start;
+  border-bottom: 1px solid #eef1f5;
+}
+
+.log-row:hover {
+  background: #f9fafc;
+}
+
+.log-row > span {
+  min-width: 0;
+  padding: 7px 12px;
+}
+
+.mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.muted {
+  color: #687386;
+}
+
+.level-badge {
+  display: inline-flex;
+  width: fit-content;
+  min-width: 58px;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+  padding: 0 8px;
+}
+
+.level-v {
+  background: #eef1f5;
+  color: #4e5a6b;
+}
+
+.level-d {
+  background: #e8f4ef;
+  color: #0f5f45;
+}
+
+.level-i {
+  background: #e8f1ff;
+  color: #2157a4;
+}
+
+.level-w {
+  background: #fff4e5;
+  color: #9a5b00;
+}
+
+.level-e,
+.level-f {
+  background: #fff0ec;
+  color: #b92f16;
+}
+
+.level-raw {
+  background: #f0edf8;
+  color: #654a9d;
+}
+
+.log-tag {
+  overflow: hidden;
+  color: #172033;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-message {
+  color: #263247;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .empty-state {

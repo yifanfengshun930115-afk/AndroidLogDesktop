@@ -1,8 +1,10 @@
 mod adb;
+mod logcat;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .manage(logcat::LogcatState::default())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -15,7 +17,9 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       adb::detect_adb,
-      adb::list_adb_devices
+      adb::list_adb_devices,
+      logcat::start_logcat,
+      logcat::stop_logcat
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

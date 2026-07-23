@@ -45,6 +45,20 @@ pub struct AdbCommandResult {
   adb: Option<AdbInfo>,
 }
 
+impl AdbInfo {
+  pub fn is_available(&self) -> bool {
+    self.available
+  }
+
+  pub fn binary_path(&self) -> Option<&str> {
+    self.path.as_deref()
+  }
+
+  pub fn install_hint(&self) -> &str {
+    &self.install_hint
+  }
+}
+
 fn adb_file_name() -> &'static str {
   if cfg!(target_os = "windows") {
     "adb.exe"

@@ -10,7 +10,8 @@
     "build:renderer": "tsc -b && vite build",
     "build": "npm run build:renderer",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "tauri build --bundles app",
+    "tauri:build:all": "tauri build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
