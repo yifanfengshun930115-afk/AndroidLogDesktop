@@ -178,6 +178,8 @@ function App() {
   const nextTabIndexRef = useRef(2)
   const tabsRef = useRef(tabs)
   const logListRef = useRef<HTMLDivElement>(null)
+  const packageFilterRef = useRef<HTMLDivElement>(null)
+  const tagFilterRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -217,6 +219,48 @@ function App() {
     setTagMenuOpen(false)
     setTagSearch('')
   }, [activeTabId])
+
+  useEffect(() => {
+    if (!packageMenuOpen && !tagMenuOpen) {
+      return undefined
+    }
+
+    const closePackageMenu = () => {
+      setPackageMenuOpen(false)
+      setPackageSearch('')
+    }
+    const closeTagMenu = () => {
+      setTagMenuOpen(false)
+      setTagSearch('')
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) {
+        return
+      }
+
+      const clickedPackageFilter = packageFilterRef.current?.contains(event.target) ?? false
+      const clickedTagFilter = tagFilterRef.current?.contains(event.target) ?? false
+      if (packageMenuOpen && !clickedPackageFilter) {
+        closePackageMenu()
+      }
+      if (tagMenuOpen && !clickedTagFilter) {
+        closeTagMenu()
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closePackageMenu()
+        closeTagMenu()
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [packageMenuOpen, tagMenuOpen])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
@@ -747,7 +791,7 @@ function App() {
         ) : null}
 
         <div className="filter-row">
-          <div className="filter-popover-anchor">
+          <div className="filter-popover-anchor" ref={packageFilterRef}>
             <button
               className="filter-trigger"
               onClick={() => {
@@ -838,7 +882,7 @@ function App() {
               </div>
             ) : null}
           </div>
-          <div className="filter-popover-anchor">
+          <div className="filter-popover-anchor" ref={tagFilterRef}>
             <button
               className="filter-trigger"
               onClick={() => {

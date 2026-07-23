@@ -87,6 +87,11 @@ class SequenceBucket {
     this.sequences.push(sequence)
   }
 
+  firstValue(minSequence: number) {
+    this.pruneBefore(minSequence)
+    return this.sequences[this.head]
+  }
+
   values(minSequence: number) {
     this.pruneBefore(minSequence)
     return this.sequences.slice(this.head)
@@ -265,7 +270,7 @@ export class LogStore {
       droppedCount: this.droppedCount,
       capacity: this.capacity,
       displayLimit: this.displayLimit,
-      tagOptions: this.indexOptions(this.tagIndex),
+      tagOptions: this.tagOptions(),
       visibleEntries,
     }
     this.cachedSnapshotVersion = this.version
@@ -527,11 +532,14 @@ export class LogStore {
     }
   }
 
-  private indexOptions(index: Map<string, SequenceBucket>) {
+  private tagOptions() {
     const minSequence = this.oldestSequence()
-    return [...index.entries()]
+    return [...this.tagIndex.entries()]
       .filter(([, bucket]) => !bucket.isEmpty(minSequence))
-      .map(([key]) => key)
+      .map(([key, bucket]) => {
+        const entry = this.getBySequence(bucket.firstValue(minSequence) ?? 0)
+        return entry?.tag || key
+      })
       .sort((first, second) => first.localeCompare(second))
   }
 
