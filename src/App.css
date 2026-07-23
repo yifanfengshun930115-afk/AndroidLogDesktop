@@ -1,0 +1,158 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 100vh;
+  background: #f4f6f8;
+  color: #172033;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  border-right: 1px solid #d9dee7;
+  background: #ffffff;
+  padding: 20px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 8px;
+  background: #1f7a5c;
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand span {
+  color: #687386;
+  font-size: 13px;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-label {
+  margin: 0;
+  color: #687386;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.device-button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.device-button.active {
+  border-color: #1f7a5c;
+  background: #e8f4ef;
+  color: #0f5f45;
+}
+
+.workspace {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.toolbar h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.toolbar p {
+  margin: 4px 0 0;
+  color: #687386;
+}
+
+.toolbar-actions,
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.filter-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 160px;
+}
+
+.filter-row input,
+.filter-row select {
+  min-height: 38px;
+  border: 1px solid #ccd4df;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172033;
+  font: inherit;
+  padding: 0 12px;
+}
+
+.log-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.log-header {
+  display: grid;
+  grid-template-columns: 150px 80px 80px 180px minmax(280px, 1fr);
+  border-bottom: 1px solid #d9dee7;
+  background: #f9fafc;
+  color: #687386;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.log-header span {
+  padding: 10px 12px;
+}
+
+.empty-state {
+  display: grid;
+  flex: 1;
+  place-content: center;
+  justify-items: center;
+  color: #687386;
+}
+
+.empty-state strong {
+  color: #172033;
+}
+
+.primary {
+  border-color: #1f7a5c;
+  background: #1f7a5c;
+  color: #ffffff;
+}
