@@ -40,6 +40,7 @@ export interface LogStoreSnapshot {
   droppedCount: number
   capacity: number
   displayLimit: number
+  tagOptions: string[]
   visibleEntries: LogEntry[]
 }
 
@@ -264,6 +265,7 @@ export class LogStore {
       droppedCount: this.droppedCount,
       capacity: this.capacity,
       displayLimit: this.displayLimit,
+      tagOptions: this.indexOptions(this.tagIndex),
       visibleEntries,
     }
     this.cachedSnapshotVersion = this.version
@@ -523,6 +525,14 @@ export class LogStore {
         index.delete(key)
       }
     }
+  }
+
+  private indexOptions(index: Map<string, SequenceBucket>) {
+    const minSequence = this.oldestSequence()
+    return [...index.entries()]
+      .filter(([, bucket]) => !bucket.isEmpty(minSequence))
+      .map(([key]) => key)
+      .sort((first, second) => first.localeCompare(second))
   }
 
   private oldestSequence() {

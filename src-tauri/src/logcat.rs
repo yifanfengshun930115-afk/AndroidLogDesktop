@@ -1,6 +1,7 @@
 use crate::adb::detect_adb_impl;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -17,7 +18,7 @@ const BATCH_INTERVAL_MS: u64 = 120;
 
 #[derive(Default)]
 pub struct LogcatState {
-    process: Mutex<Option<LogcatProcess>>,
+    processes: Mutex<HashMap<String, LogcatProcess>>,
 }
 
 struct LogcatProcess {
@@ -76,11 +77,9 @@ fn emit_message(app: &AppHandle, event: &str, session_id: &str, message: impl In
     );
 }
 
-fn stop_existing_process(state: &LogcatState) {
-    if let Some(mut process) = state.process.lock().ok().and_then(|mut guard| guard.take()) {
-        let _ = process.child.kill();
-        let _ = process.child.wait();
-    }
+fn stop_process(process: &mut LogcatProcess) {
+    let _ = process.child.kill();
+    let _ = process.child.wait();
 }
 
 fn spawn_stdout_reader(
@@ -160,8 +159,6 @@ pub fn start_logcat(
         .ok_or_else(|| adb.install_hint().to_string())?
         .to_string();
 
-    stop_existing_process(&state);
-
     let session_id = session_id();
     let mut child = Command::new(adb_path)
         .args(["-s", &serial, "logcat", "-v", "threadtime", "-T", "1"])
@@ -182,10 +179,17 @@ pub fn start_logcat(
     spawn_stdout_reader(app.clone(), session_id.clone(), stdout);
     spawn_stderr_reader(app, session_id.clone(), stderr);
 
-    *state.process.lock().map_err(|error| error.to_string())? = Some(LogcatProcess {
-        session_id: session_id.clone(),
-        child,
-    });
+    state
+        .processes
+        .lock()
+        .map_err(|error| error.to_string())?
+        .insert(
+            session_id.clone(),
+            LogcatProcess {
+                session_id: session_id.clone(),
+                child,
+            },
+        );
 
     Ok(LogcatSessionInfo {
         session_id,
@@ -195,12 +199,28 @@ pub fn start_logcat(
 }
 
 #[tauri::command]
-pub fn stop_logcat(state: State<'_, LogcatState>) -> Result<LogcatSessionInfo, String> {
+pub fn stop_logcat(
+    state: State<'_, LogcatState>,
+    session_id: Option<String>,
+) -> Result<LogcatSessionInfo, String> {
+    let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+        let mut processes = state.processes.lock().map_err(|error| error.to_string())?;
+        for process in processes.values_mut() {
+            stop_process(process);
+        }
+        processes.clear();
+        return Ok(LogcatSessionInfo {
+            session_id: String::new(),
+            serial: String::new(),
+            running: false,
+        });
+    };
+
     let Some(mut process) = state
-        .process
+        .processes
         .lock()
         .map_err(|error| error.to_string())?
-        .take()
+        .remove(&session_id)
     else {
         return Ok(LogcatSessionInfo {
             session_id: String::new(),
@@ -210,8 +230,7 @@ pub fn stop_logcat(state: State<'_, LogcatState>) -> Result<LogcatSessionInfo, S
     };
 
     let session_id = process.session_id.clone();
-    let _ = process.child.kill();
-    let _ = process.child.wait();
+    stop_process(&mut process);
 
     Ok(LogcatSessionInfo {
         session_id,

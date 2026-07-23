@@ -1,16 +1,31 @@
 import {
   AlertTriangle,
+  ArrowDownToLine,
+  ArrowUpToLine,
   CheckCircle2,
   Download,
+  Menu,
+  Package,
+  Pause,
   Play,
+  Plus,
   RefreshCcw,
+  RotateCcw,
   Search,
-  Square,
   Trash2,
   Usb,
+  WrapText,
+  X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { listAdbDevices } from './api/adb'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
+import { listAdbDevices, listAdbProcesses } from './api/adb'
 import { exportLogs } from './api/exportLogs'
 import {
   listenLogcatBatch,
@@ -21,46 +36,174 @@ import {
 } from './api/logcat'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
-import { logStore, type LevelFilter } from './logStore'
-import type { AdbDevice, AdbInfo, LogLevel, LogcatSessionInfo } from './types'
+import { LogStore, logStore, type LevelFilter } from './logStore'
+import type {
+  AdbDevice,
+  AdbInfo,
+  AdbProcessInfo,
+  LogLevel,
+  LogcatSessionInfo,
+} from './types'
 
-function deviceLabel(device: AdbDevice) {
-  return device.description ? `${device.serial} ${device.description}` : device.serial
+interface LogTab {
+  id: string
+  title: string
+  store: LogStore
+  selectedSerial: string
+  session?: LogcatSessionInfo
+  paused: boolean
+  softWrap: boolean
+  levelFilter: LevelFilter
+  searchText: string
+  selectedTags: string[]
+  selectedPackages: string[]
+  processes: AdbProcessInfo[]
+  processError: string
+  loadingProcesses: boolean
+}
+
+function createLogTab(index: number, selectedSerial = ''): LogTab {
+  return {
+    id: `tab-${index}`,
+    title: `Logcat ${index}`,
+    store: index === 1 ? logStore : new LogStore(),
+    selectedSerial,
+    paused: false,
+    softWrap: false,
+    levelFilter: 'all',
+    searchText: '',
+    selectedTags: [],
+    selectedPackages: [],
+    processes: [],
+    processError: '',
+    loadingProcesses: false,
+  }
+}
+
+function parseDeviceDescription(description: string) {
+  return Object.fromEntries(
+    description
+      .split(/\s+/)
+      .map((part) => part.split(':'))
+      .filter(([key, value]) => key && value),
+  )
+}
+
+function deviceTitle(device: AdbDevice) {
+  const props = parseDeviceDescription(device.description)
+  return props.model?.replaceAll('_', ' ') || props.device || device.serial
+}
+
+function deviceSubtitle(device: AdbDevice) {
+  const props = parseDeviceDescription(device.description)
+  const details = [props.product, props.device, device.serial].filter(Boolean)
+  return details.join(' · ')
 }
 
 function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
 
+function selectedOptions(options: HTMLCollectionOf<HTMLOptionElement>) {
+  return Array.from(options)
+    .filter((option) => option.selected)
+    .map((option) => option.value)
+}
+
+function packageOptions(processes: AdbProcessInfo[]) {
+  const seen = new Set<string>()
+  return processes
+    .filter((process) => {
+      if (!process.name || process.name.startsWith('[') || seen.has(process.name)) {
+        return false
+      }
+      seen.add(process.name)
+      return true
+    })
+    .sort((first, second) => first.name.localeCompare(second.name))
+}
+
+function packagePids(processes: AdbProcessInfo[], selectedPackages: string[]) {
+  const selected = new Set(selectedPackages)
+  return processes
+    .filter((process) => selected.has(process.name))
+    .map((process) => process.pid)
+}
+
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
-  const [selectedSerial, setSelectedSerial] = useState('')
   const [loadingDevices, setLoadingDevices] = useState(false)
   const [deviceError, setDeviceError] = useState('')
-  const [session, setSession] = useState<LogcatSessionInfo>()
   const [logError, setLogError] = useState('')
-  const [isStarting, setIsStarting] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [exportPath, setExportPath] = useState('')
   const [exportError, setExportError] = useState('')
-  const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
-  const [searchText, setSearchText] = useState('')
-  const sessionIdRef = useRef('')
-  const sessionDeviceSerialRef = useRef('')
+  const [drawerOpen, setDrawerOpen] = useState(true)
+  const [startingTabId, setStartingTabId] = useState('')
+  const [tabs, setTabs] = useState<LogTab[]>(() => [createLogTab(1)])
+  const [activeTabId, setActiveTabId] = useState('tab-1')
+  const nextTabIndexRef = useRef(2)
+  const tabsRef = useRef(tabs)
+  const logListRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    tabsRef.current = tabs
+  }, [tabs])
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]
+  const activeStore = activeTab.store
   const logSnapshot = useSyncExternalStore(
-    logStore.subscribe,
-    logStore.getSnapshot,
-    logStore.getSnapshot,
+    activeStore.subscribe,
+    activeStore.getSnapshot,
+    activeStore.getSnapshot,
   )
 
   const onlineDevices = useMemo(
     () => devices.filter((device) => device.state === 'device'),
     [devices],
   )
-  const selectedDevice = onlineDevices.find((device) => device.serial === selectedSerial)
-  const isListening = Boolean(session?.running)
+  const selectedDevice = onlineDevices.find((device) => device.serial === activeTab.selectedSerial)
+  const isRunning = Boolean(activeTab.session?.running)
+  const isStarting = startingTabId === activeTab.id
   const visibleLogs = logSnapshot.visibleEntries
+  const packages = packageOptions(activeTab.processes)
+
+  const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
+    setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
+  }, [])
+
+  const updateActiveTab = useCallback(
+    (updater: (tab: LogTab) => LogTab) => updateTab(activeTabId, updater),
+    [activeTabId, updateTab],
+  )
+
+  const refreshProcesses = useCallback(
+    async (tabId: string, serial: string) => {
+      if (!serial) {
+        return
+      }
+
+      updateTab(tabId, (tab) => ({ ...tab, loadingProcesses: true, processError: '' }))
+      try {
+        const result = await listAdbProcesses(serial)
+        updateTab(tabId, (tab) => ({
+          ...tab,
+          processes: result.processes,
+          processError: result.ok ? '' : result.error ?? '读取进程列表失败',
+          loadingProcesses: false,
+        }))
+      } catch (error) {
+        updateTab(tabId, (tab) => ({
+          ...tab,
+          processes: [],
+          processError: error instanceof Error ? error.message : String(error),
+          loadingProcesses: false,
+        }))
+      }
+    },
+    [updateTab],
+  )
 
   const refreshDevices = useCallback(async () => {
     setLoadingDevices(true)
@@ -73,12 +216,19 @@ function App() {
 
       setAdbInfo(result.adb)
       setDevices(nextDevices)
-      setSelectedSerial((current) => {
-        if (current && nextOnlineDevices.some((device) => device.serial === current)) {
-          return current
-        }
-        return nextOnlineDevices[0]?.serial ?? ''
-      })
+      setTabs((current) =>
+        current.map((tab) => {
+          if (tab.selectedSerial && nextOnlineDevices.some((device) => device.serial === tab.selectedSerial)) {
+            return tab
+          }
+          return {
+            ...tab,
+            selectedSerial: nextOnlineDevices[0]?.serial ?? '',
+            selectedPackages: [],
+            processes: [],
+          }
+        }),
+      )
 
       if (!result.ok) {
         setDeviceError(result.error ?? '读取设备列表失败')
@@ -86,49 +236,63 @@ function App() {
     } catch (error) {
       setDeviceError(error instanceof Error ? error.message : String(error))
       setDevices([])
-      setSelectedSerial('')
+      setTabs((current) =>
+        current.map((tab) => ({
+          ...tab,
+          selectedSerial: '',
+          selectedPackages: [],
+          processes: [],
+        })),
+      )
     } finally {
       setLoadingDevices(false)
     }
   }, [])
 
-  const handleStartLogcat = useCallback(async () => {
-    if (!selectedDevice) {
+  const startTabLogcat = useCallback(
+    async (tabId: string, clearBeforeStart: boolean) => {
+      const tab = tabsRef.current.find((item) => item.id === tabId)
+      if (!tab?.selectedSerial) {
+        return
+      }
+
+      if (tab.session?.sessionId) {
+        await stopLogcat(tab.session.sessionId)
+      }
+      if (clearBeforeStart) {
+        tab.store.clear()
+      }
+
+      setLogError('')
+      setStartingTabId(tabId)
+      try {
+        const nextSession = await startLogcat(tab.selectedSerial)
+        updateTab(tabId, (current) => ({
+          ...current,
+          session: nextSession,
+          paused: false,
+        }))
+      } catch (error) {
+        setLogError(error instanceof Error ? error.message : String(error))
+        updateTab(tabId, (current) => ({ ...current, session: undefined, paused: false }))
+      } finally {
+        setStartingTabId('')
+      }
+    },
+    [updateTab],
+  )
+
+  const handleStartPause = useCallback(() => {
+    if (!isRunning) {
+      void startTabLogcat(activeTab.id, activeTab.store.getSnapshot().totalCount === 0)
       return
     }
+    updateActiveTab((tab) => ({ ...tab, paused: !tab.paused }))
+  }, [activeTab, isRunning, startTabLogcat, updateActiveTab])
 
-    sessionIdRef.current = ''
-    sessionDeviceSerialRef.current = ''
-    logStore.clear()
-    setLogError('')
-    setIsStarting(true)
-
-    try {
-      const nextSession = await startLogcat(selectedDevice.serial)
-      sessionIdRef.current = nextSession.sessionId
-      sessionDeviceSerialRef.current = nextSession.serial
-      setSession(nextSession)
-    } catch (error) {
-      setLogError(error instanceof Error ? error.message : String(error))
-      setSession(undefined)
-      sessionIdRef.current = ''
-      sessionDeviceSerialRef.current = ''
-    } finally {
-      setIsStarting(false)
-    }
-  }, [selectedDevice])
-
-  const handleStopLogcat = useCallback(async () => {
-    try {
-      await stopLogcat()
-    } catch (error) {
-      setLogError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setSession(undefined)
-      sessionIdRef.current = ''
-      sessionDeviceSerialRef.current = ''
-    }
-  }, [])
+  const handleRestart = useCallback(() => {
+    void startTabLogcat(activeTab.id, true)
+  }, [activeTab.id, startTabLogcat])
 
   const handleExportLogs = useCallback(async () => {
     setExportPath('')
@@ -136,25 +300,78 @@ function App() {
     setIsExporting(true)
 
     try {
-      const result = await exportLogs(logStore.getExportContent())
+      const result = await exportLogs(activeTab.store.getExportContent())
       setExportPath(result.filePath)
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error))
     } finally {
       setIsExporting(false)
     }
-  }, [])
+  }, [activeTab.store])
+
+  const addTab = useCallback(() => {
+    const nextIndex = nextTabIndexRef.current
+    nextTabIndexRef.current += 1
+    const tab = createLogTab(nextIndex, onlineDevices[0]?.serial ?? '')
+    setTabs((current) => [...current, tab])
+    setActiveTabId(tab.id)
+  }, [onlineDevices])
+
+  const closeTab = useCallback(
+    (tabId: string) => {
+      const tab = tabsRef.current.find((item) => item.id === tabId)
+      if (tab?.session?.sessionId) {
+        void stopLogcat(tab.session.sessionId)
+      }
+
+      setTabs((current) => {
+        if (current.length === 1) {
+          const replacement = createLogTab(nextTabIndexRef.current, onlineDevices[0]?.serial ?? '')
+          nextTabIndexRef.current += 1
+          setActiveTabId(replacement.id)
+          return [replacement]
+        }
+        const nextTabs = current.filter((item) => item.id !== tabId)
+        if (activeTabId === tabId) {
+          setActiveTabId(nextTabs[0].id)
+        }
+        return nextTabs
+      })
+    },
+    [activeTabId, onlineDevices],
+  )
 
   useEffect(() => {
     void refreshDevices()
   }, [refreshDevices])
 
   useEffect(() => {
-    logStore.setFilter({
-      level: levelFilter,
-      query: searchText,
+    if (activeTab.selectedSerial && activeTab.processes.length === 0 && !activeTab.loadingProcesses) {
+      void refreshProcesses(activeTab.id, activeTab.selectedSerial)
+    }
+  }, [
+    activeTab.id,
+    activeTab.loadingProcesses,
+    activeTab.processes.length,
+    activeTab.selectedSerial,
+    refreshProcesses,
+  ])
+
+  useEffect(() => {
+    activeTab.store.setQuery({
+      levels: activeTab.levelFilter === 'all' ? [] : [activeTab.levelFilter],
+      includeText: activeTab.searchText,
+      tags: activeTab.selectedTags,
+      pids: packagePids(activeTab.processes, activeTab.selectedPackages),
     })
-  }, [levelFilter, searchText])
+  }, [
+    activeTab.levelFilter,
+    activeTab.processes,
+    activeTab.searchText,
+    activeTab.selectedPackages,
+    activeTab.selectedTags,
+    activeTab.store,
+  ])
 
   useEffect(() => {
     let disposed = false
@@ -162,29 +379,29 @@ function App() {
 
     Promise.all([
       listenLogcatBatch((payload) => {
-        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
+        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
+        if (!tab || tab.paused) {
           return
         }
 
-        logStore.appendRawBatch({
+        tab.store.appendRawBatch({
           sessionId: payload.sessionId,
           lines: payload.lines,
-          deviceSerial: sessionDeviceSerialRef.current || undefined,
+          deviceSerial: tab.session?.serial,
         })
       }),
       listenLogcatError((payload) => {
-        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
-          return
+        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
+        if (tab) {
+          setLogError(payload.message)
         }
-        setLogError(payload.message)
       }),
       listenLogcatStopped((payload) => {
-        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
+        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
+        if (!tab) {
           return
         }
-        setSession(undefined)
-        sessionIdRef.current = ''
-        sessionDeviceSerialRef.current = ''
+        updateTab(tab.id, (current) => ({ ...current, session: undefined, paused: false }))
       }),
     ]).then((callbacks) => {
       if (disposed) {
@@ -197,18 +414,23 @@ function App() {
     return () => {
       disposed = true
       unlistenCallbacks.forEach((callback) => callback())
+      void stopLogcat()
     }
-  }, [])
+  }, [updateTab])
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
+      {drawerOpen ? <button className="drawer-backdrop" onClick={() => setDrawerOpen(false)} /> : null}
+      <aside className={`drawer ${drawerOpen ? 'open' : ''}`}>
         <div className="brand">
           <span className="brand-mark">AL</span>
           <div>
             <strong>Android Log</strong>
             <span>Desktop</span>
           </div>
+          <button className="icon-button drawer-close" onClick={() => setDrawerOpen(false)}>
+            <X size={16} />
+          </button>
         </div>
 
         <section className="sidebar-section">
@@ -217,7 +439,7 @@ function App() {
             <button
               aria-label="刷新设备"
               className="icon-button"
-              disabled={loadingDevices || isListening}
+              disabled={loadingDevices || isRunning}
               onClick={refreshDevices}
               title="刷新设备"
             >
@@ -228,18 +450,79 @@ function App() {
           {onlineDevices.length > 0 ? (
             onlineDevices.map((device) => (
               <button
-                className={`device-button ${device.serial === selectedSerial ? 'active' : ''}`}
-                disabled={isListening}
+                className={`device-button ${device.serial === activeTab.selectedSerial ? 'active' : ''}`}
+                disabled={isRunning}
                 key={device.serial}
-                onClick={() => setSelectedSerial(device.serial)}
+                onClick={() => {
+                  updateActiveTab((tab) => ({
+                    ...tab,
+                    selectedSerial: device.serial,
+                    selectedPackages: [],
+                    processes: [],
+                  }))
+                  void refreshProcesses(activeTab.id, device.serial)
+                }}
               >
                 <Usb size={16} />
-                <span>{deviceLabel(device)}</span>
+                <span>
+                  <strong>{deviceTitle(device)}</strong>
+                  <small>{deviceSubtitle(device)}</small>
+                </span>
               </button>
             ))
           ) : (
             <div className="device-empty">未连接可用设备</div>
           )}
+        </section>
+
+        <section className="sidebar-section">
+          <p className="section-label">包名 / 进程</p>
+          <select
+            className="multi-select"
+            multiple
+            onChange={(event) =>
+              updateActiveTab((tab) => ({
+                ...tab,
+                selectedPackages: selectedOptions(event.currentTarget.selectedOptions),
+              }))
+            }
+            value={activeTab.selectedPackages}
+          >
+            {packages.map((process) => (
+              <option key={process.name} value={process.name}>
+                {process.name}
+              </option>
+            ))}
+          </select>
+          <button
+            disabled={!activeTab.selectedSerial || activeTab.loadingProcesses}
+            onClick={() => void refreshProcesses(activeTab.id, activeTab.selectedSerial)}
+          >
+            <RefreshCcw size={16} />
+            {activeTab.loadingProcesses ? '读取中' : '刷新进程'}
+          </button>
+          {activeTab.processError ? <span className="inline-error">{activeTab.processError}</span> : null}
+        </section>
+
+        <section className="sidebar-section">
+          <p className="section-label">Tag</p>
+          <select
+            className="multi-select"
+            multiple
+            onChange={(event) =>
+              updateActiveTab((tab) => ({
+                ...tab,
+                selectedTags: selectedOptions(event.currentTarget.selectedOptions),
+              }))
+            }
+            value={activeTab.selectedTags}
+          >
+            {logSnapshot.tagOptions.map((tag) => (
+              <option key={tag} value={tag}>
+                {tag}
+              </option>
+            ))}
+          </select>
         </section>
 
         <section className="sidebar-section">
@@ -252,7 +535,7 @@ function App() {
         </section>
 
         <section className="sidebar-section metrics">
-          <p className="section-label">当前会话</p>
+          <p className="section-label">当前页面</p>
           <div>
             <span>缓存</span>
             <strong>{logSnapshot.totalCount}</strong>
@@ -269,30 +552,73 @@ function App() {
       </aside>
 
       <section className="workspace">
+        <div className="tab-strip">
+          {tabs.map((tab) => (
+            <button
+              className={`tab-button ${tab.id === activeTab.id ? 'active' : ''}`}
+              key={tab.id}
+              onClick={() => setActiveTabId(tab.id)}
+            >
+              <span>{tab.title}</span>
+              {tab.session?.running ? <small>{tab.paused ? '暂停' : '运行'}</small> : null}
+              <X
+                size={14}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  closeTab(tab.id)
+                }}
+              />
+            </button>
+          ))}
+          <button className="tab-add" onClick={addTab}>
+            <Plus size={16} />
+          </button>
+        </div>
+
         <header className="toolbar">
-          <div>
-            <h1>Logcat</h1>
-            <p>{selectedDevice ? deviceLabel(selectedDevice) : '等待设备连接'}</p>
+          <div className="title-row">
+            <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
+              <Menu size={18} />
+            </button>
+            <div>
+              <h1>Logcat</h1>
+              <p>{selectedDevice ? deviceTitle(selectedDevice) : '等待设备连接'}</p>
+            </div>
           </div>
           <div className="toolbar-actions">
-            <button disabled={loadingDevices || isListening} onClick={refreshDevices}>
-              <RefreshCcw size={16} />
-              刷新设备
+            <button disabled={!selectedDevice || isStarting} onClick={handleStartPause}>
+              {isRunning && !activeTab.paused ? <Pause size={16} /> : <Play size={16} />}
+              {!isRunning ? (isStarting ? '启动中' : '开始') : activeTab.paused ? '继续' : '暂停'}
             </button>
-            {isListening ? (
-              <button onClick={handleStopLogcat}>
-                <Square size={16} />
-                停止监听
-              </button>
-            ) : (
-              <button className="primary" disabled={!selectedDevice || isStarting} onClick={handleStartLogcat}>
-                <Play size={16} />
-                {isStarting ? '启动中' : '开始监听'}
-              </button>
-            )}
-            <button disabled={logSnapshot.totalCount === 0} onClick={() => logStore.clear()}>
+            <button disabled={!selectedDevice || isStarting} onClick={handleRestart}>
+              <RotateCcw size={16} />
+              Restart
+            </button>
+            <button disabled={logSnapshot.totalCount === 0} onClick={() => activeTab.store.clear()}>
               <Trash2 size={16} />
-              清空
+              清理
+            </button>
+            <button onClick={() => logListRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}>
+              <ArrowUpToLine size={16} />
+              滚顶
+            </button>
+            <button
+              onClick={() =>
+                logListRef.current?.scrollTo({
+                  top: logListRef.current.scrollHeight,
+                  behavior: 'smooth',
+                })
+              }
+            >
+              <ArrowDownToLine size={16} />
+              滚底
+            </button>
+            <button
+              className={activeTab.softWrap ? 'active-toggle' : ''}
+              onClick={() => updateActiveTab((tab) => ({ ...tab, softWrap: !tab.softWrap }))}
+            >
+              <WrapText size={16} />
+              Soft-wrap
             </button>
             <button disabled={logSnapshot.filteredCount === 0 || isExporting} onClick={handleExportLogs}>
               <Download size={16} />
@@ -355,14 +681,21 @@ function App() {
           <label className="search-field">
             <Search size={16} />
             <input
-              onChange={(event) => setSearchText(event.target.value)}
+              onChange={(event) =>
+                updateActiveTab((tab) => ({ ...tab, searchText: event.target.value }))
+              }
               placeholder="搜索日志、Tag、包名"
-              value={searchText}
+              value={activeTab.searchText}
             />
           </label>
           <select
-            onChange={(event) => setLevelFilter(event.target.value as LevelFilter)}
-            value={levelFilter}
+            onChange={(event) =>
+              updateActiveTab((tab) => ({
+                ...tab,
+                levelFilter: event.target.value as LevelFilter,
+              }))
+            }
+            value={activeTab.levelFilter}
           >
             <option value="all">全部级别</option>
             <option value="F">Fatal</option>
@@ -373,9 +706,13 @@ function App() {
             <option value="V">Verbose</option>
             <option value="?">Raw</option>
           </select>
+          <button className="package-filter-button" onClick={() => setDrawerOpen(true)}>
+            <Package size={16} />
+            包名 {activeTab.selectedPackages.length || ''}
+          </button>
         </div>
 
-        <div className="log-panel">
+        <div className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}>
           <div className="log-header">
             <span>时间</span>
             <span>级别</span>
@@ -384,7 +721,7 @@ function App() {
             <span>内容</span>
           </div>
           {visibleLogs.length > 0 ? (
-            <div className="log-list">
+            <div className="log-list" ref={logListRef}>
               {visibleLogs.map((entry) => (
                 <div className="log-row" key={entry.id} title={entry.raw}>
                   <span className="mono muted">{entry.timestamp || '-'}</span>
@@ -399,8 +736,8 @@ function App() {
             </div>
           ) : (
             <div className="empty-state">
-              <strong>{isListening ? '正在监听' : '等待日志输入'}</strong>
-              <span>{isListening ? '当前过滤条件下暂无日志。' : '连接设备后即可开始监听 logcat。'}</span>
+              <strong>{isRunning ? (activeTab.paused ? '已暂停' : '正在监听') : '等待日志输入'}</strong>
+              <span>{isRunning ? '当前过滤条件下暂无日志。' : '连接设备后即可开始监听 logcat。'}</span>
             </div>
           )}
         </div>

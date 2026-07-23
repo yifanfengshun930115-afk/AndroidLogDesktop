@@ -45,6 +45,24 @@ pub struct AdbCommandResult {
     adb: Option<AdbInfo>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdbProcessInfo {
+    pid: String,
+    name: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdbProcessResult {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    error: Option<String>,
+    processes: Vec<AdbProcessInfo>,
+    adb: Option<AdbInfo>,
+}
+
 impl AdbInfo {
     pub fn is_available(&self) -> bool {
         self.available
@@ -335,6 +353,25 @@ fn parse_devices(stdout: &str) -> Vec<AdbDevice> {
         .collect()
 }
 
+fn parse_processes(stdout: &str) -> Vec<AdbProcessInfo> {
+    stdout
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.to_string();
+            let name = parts.collect::<Vec<_>>().join(" ");
+            if pid.chars().all(|value| value.is_ascii_digit()) && !name.is_empty() {
+                Some(AdbProcessInfo { pid, name })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn detect_adb(app: AppHandle) -> AdbInfo {
     detect_adb_impl(&app)
@@ -349,4 +386,33 @@ pub fn list_adb_devices(app: AppHandle) -> AdbCommandResult {
         vec![]
     });
     result
+}
+
+#[tauri::command]
+pub fn list_adb_processes(app: AppHandle, serial: String) -> AdbProcessResult {
+    let serial = serial.trim();
+    if serial.is_empty() {
+        return AdbProcessResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("请先选择一个在线设备".to_string()),
+            processes: vec![],
+            adb: Some(detect_adb_impl(&app)),
+        };
+    }
+
+    let result = run_adb(&app, &["-s", serial, "shell", "ps", "-A", "-o", "PID,NAME"]);
+    AdbProcessResult {
+        ok: result.ok,
+        stdout: result.stdout.clone(),
+        stderr: result.stderr.clone(),
+        error: result.error.clone(),
+        processes: if result.ok {
+            parse_processes(&result.stdout)
+        } else {
+            vec![]
+        },
+        adb: result.adb,
+    }
 }

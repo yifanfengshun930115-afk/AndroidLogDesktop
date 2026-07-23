@@ -23,6 +23,7 @@ describe('LogStore', () => {
       tag: 'DemoTag',
       message: 'debug message',
     })
+    expect(snapshot.tagOptions).toEqual(['crashtag', 'demotag'])
     expect(snapshot.visibleEntries[2]?.isCrash).toBe(true)
   })
 

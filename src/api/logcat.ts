@@ -14,8 +14,8 @@ export function startLogcat(serial: string) {
   return invoke<LogcatSessionInfo>('start_logcat', { serial })
 }
 
-export function stopLogcat() {
-  return invoke<LogcatSessionInfo>('stop_logcat')
+export function stopLogcat(sessionId?: string) {
+  return invoke<LogcatSessionInfo>('stop_logcat', { sessionId })
 }
 
 export function listenLogcatBatch(handler: (payload: LogcatBatchPayload) => void) {

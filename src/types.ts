@@ -22,6 +22,20 @@ export interface AdbCommandResult {
   adb?: AdbInfo
 }
 
+export interface AdbProcessInfo {
+  pid: string
+  name: string
+}
+
+export interface AdbProcessResult {
+  ok: boolean
+  stdout: string
+  stderr: string
+  error?: string
+  processes: AdbProcessInfo[]
+  adb?: AdbInfo
+}
+
 export type LogLevel = 'V' | 'D' | 'I' | 'W' | 'E' | 'F' | '?'
 
 export interface LogcatSessionInfo {

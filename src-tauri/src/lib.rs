@@ -19,6 +19,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             adb::detect_adb,
             adb::list_adb_devices,
+            adb::list_adb_processes,
             export::export_logs,
             logcat::start_logcat,
             logcat::stop_logcat
