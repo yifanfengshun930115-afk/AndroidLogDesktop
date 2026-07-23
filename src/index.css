@@ -44,12 +44,28 @@ button {
     color 120ms ease;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 button:hover {
   border-color: #9aa8ba;
   background: #f9fafc;
 }
 
+button:disabled:hover {
+  border-color: #ccd4df;
+  background: #ffffff;
+}
+
 button:focus-visible {
   outline: 2px solid #1f7a5c;
   outline-offset: 2px;
+}
+
+.icon-button {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
 }
