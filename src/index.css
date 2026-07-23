@@ -1,4 +1,36 @@
 :root {
+  color-scheme: light;
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f9fafc;
+  --color-surface-muted: #eef1f5;
+  --color-border: #d9dee7;
+  --color-border-strong: #9aa8ba;
+  --color-text: #172033;
+  --color-text-muted: #687386;
+  --color-text-soft: #4e5a6b;
+  --color-primary: #1f7a5c;
+  --color-primary-strong: #0f5f45;
+  --color-primary-soft: #e8f4ef;
+  --color-danger: #b92f16;
+  --color-danger-strong: #9f351a;
+  --color-danger-soft: #fff0ec;
+  --color-warning: #9a5b00;
+  --color-warning-soft: #fff4e5;
+  --color-info: #2157a4;
+  --color-info-soft: #e8f1ff;
+  --color-purple: #654a9d;
+  --color-purple-soft: #f0edf8;
+  --color-overlay: rgba(23, 32, 51, 0.16);
+  --shadow-popover: 0 18px 50px rgba(23, 32, 51, 0.18);
+  --log-row-hover: #f9fafc;
+  --log-verbose-bg: #f8fafc;
+  --log-debug-bg: #f2fbf7;
+  --log-info-bg: #f4f8ff;
+  --log-warn-bg: #fff9ef;
+  --log-error-bg: #fff5f2;
+  --log-fatal-bg: #fff0ec;
+  --log-raw-bg: #faf7ff;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -10,6 +42,41 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-bg: #0f141d;
+  --color-surface: #151b25;
+  --color-surface-subtle: #1a2230;
+  --color-surface-muted: #202a38;
+  --color-border: #2c3748;
+  --color-border-strong: #536174;
+  --color-text: #e6edf6;
+  --color-text-muted: #9aa8ba;
+  --color-text-soft: #c0cad8;
+  --color-primary: #4aa982;
+  --color-primary-strong: #6cc49d;
+  --color-primary-soft: #17382c;
+  --color-danger: #ff8a72;
+  --color-danger-strong: #ffb09f;
+  --color-danger-soft: #3b1c17;
+  --color-warning: #f0b35c;
+  --color-warning-soft: #3c2a12;
+  --color-info: #8db8ff;
+  --color-info-soft: #172942;
+  --color-purple: #c2a7ff;
+  --color-purple-soft: #271f3a;
+  --color-overlay: rgba(2, 6, 12, 0.56);
+  --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.42);
+  --log-row-hover: #1b2431;
+  --log-verbose-bg: #121923;
+  --log-debug-bg: #10251d;
+  --log-info-bg: #122236;
+  --log-warn-bg: #2a2112;
+  --log-error-bg: #301914;
+  --log-fatal-bg: #3a1712;
+  --log-raw-bg: #211a30;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -18,7 +85,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #f4f6f8;
+  background: var(--color-bg);
 }
 
 #root {
@@ -30,10 +97,10 @@ button {
   min-height: 38px;
   align-items: center;
   justify-content: center;
-  border: 1px solid #ccd4df;
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: #ffffff;
-  color: #172033;
+  background: var(--color-surface);
+  color: var(--color-text);
   cursor: pointer;
   font: inherit;
   font-weight: 500;
@@ -50,22 +117,24 @@ button:disabled {
 }
 
 button:hover {
-  border-color: #9aa8ba;
-  background: #f9fafc;
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-subtle);
 }
 
 button:disabled:hover {
-  border-color: #ccd4df;
-  background: #ffffff;
+  border-color: var(--color-border);
+  background: var(--color-surface);
 }
 
 .primary:disabled:hover {
-  border-color: #1f7a5c;
-  background: #1f7a5c;
+  border-color: var(--color-primary);
+  background: var(--color-primary);
 }
 
-button:focus-visible {
-  outline: 2px solid #1f7a5c;
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 

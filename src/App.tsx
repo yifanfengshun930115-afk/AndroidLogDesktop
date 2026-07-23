@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Download,
   Menu,
+  Moon,
   Package,
   Pause,
   Play,
@@ -12,6 +13,7 @@ import {
   RefreshCcw,
   RotateCcw,
   Search,
+  Sun,
   Trash2,
   Usb,
   WrapText,
@@ -57,6 +59,7 @@ interface LogTab {
   searchText: string
   selectedTags: string[]
   selectedPackages: string[]
+  packageSelectMode: 'single' | 'multiple'
   processes: AdbProcessInfo[]
   processError: string
   loadingProcesses: boolean
@@ -74,6 +77,7 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     searchText: '',
     selectedTags: [],
     selectedPackages: [],
+    packageSelectMode: 'multiple',
     processes: [],
     processError: '',
     loadingProcesses: false,
@@ -130,6 +134,15 @@ function packagePids(processes: AdbProcessInfo[], selectedPackages: string[]) {
     .map((process) => process.pid)
 }
 
+function filterPackageOptions(processes: AdbProcessInfo[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase()
+  const options = packageOptions(processes)
+  if (!normalizedQuery) {
+    return options
+  }
+  return options.filter((process) => process.name.toLowerCase().includes(normalizedQuery))
+}
+
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
@@ -140,6 +153,9 @@ function App() {
   const [exportPath, setExportPath] = useState('')
   const [exportError, setExportError] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(true)
+  const [packageMenuOpen, setPackageMenuOpen] = useState(false)
+  const [packageSearch, setPackageSearch] = useState('')
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [startingTabId, setStartingTabId] = useState('')
   const [tabs, setTabs] = useState<LogTab[]>(() => [createLogTab(1)])
   const [activeTabId, setActiveTabId] = useState('tab-1')
@@ -168,6 +184,16 @@ function App() {
   const isStarting = startingTabId === activeTab.id
   const visibleLogs = logSnapshot.visibleEntries
   const packages = packageOptions(activeTab.processes)
+  const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  useEffect(() => {
+    setPackageMenuOpen(false)
+    setPackageSearch('')
+  }, [activeTabId])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
@@ -308,6 +334,30 @@ function App() {
       setIsExporting(false)
     }
   }, [activeTab.store])
+
+  const togglePackage = useCallback(
+    (packageName: string) => {
+      updateActiveTab((tab) => {
+        if (tab.packageSelectMode === 'single') {
+          return {
+            ...tab,
+            selectedPackages: tab.selectedPackages[0] === packageName ? [] : [packageName],
+          }
+        }
+        const selected = new Set(tab.selectedPackages)
+        if (selected.has(packageName)) {
+          selected.delete(packageName)
+        } else {
+          selected.add(packageName)
+        }
+        return {
+          ...tab,
+          selectedPackages: [...selected],
+        }
+      })
+    },
+    [updateActiveTab],
+  )
 
   const addTab = useCallback(() => {
     const nextIndex = nextTabIndexRef.current
@@ -476,35 +526,6 @@ function App() {
         </section>
 
         <section className="sidebar-section">
-          <p className="section-label">包名 / 进程</p>
-          <select
-            className="multi-select"
-            multiple
-            onChange={(event) =>
-              updateActiveTab((tab) => ({
-                ...tab,
-                selectedPackages: selectedOptions(event.currentTarget.selectedOptions),
-              }))
-            }
-            value={activeTab.selectedPackages}
-          >
-            {packages.map((process) => (
-              <option key={process.name} value={process.name}>
-                {process.name}
-              </option>
-            ))}
-          </select>
-          <button
-            disabled={!activeTab.selectedSerial || activeTab.loadingProcesses}
-            onClick={() => void refreshProcesses(activeTab.id, activeTab.selectedSerial)}
-          >
-            <RefreshCcw size={16} />
-            {activeTab.loadingProcesses ? '读取中' : '刷新进程'}
-          </button>
-          {activeTab.processError ? <span className="inline-error">{activeTab.processError}</span> : null}
-        </section>
-
-        <section className="sidebar-section">
           <p className="section-label">Tag</p>
           <select
             className="multi-select"
@@ -624,6 +645,10 @@ function App() {
               <Download size={16} />
               {isExporting ? '导出中' : '导出'}
             </button>
+            <button onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}>
+              {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+              {theme === 'light' ? '暗色' : '亮色'}
+            </button>
           </div>
         </header>
 
@@ -706,10 +731,87 @@ function App() {
             <option value="V">Verbose</option>
             <option value="?">Raw</option>
           </select>
-          <button className="package-filter-button" onClick={() => setDrawerOpen(true)}>
-            <Package size={16} />
-            包名 {activeTab.selectedPackages.length || ''}
-          </button>
+          <div className="package-filter">
+            <button className="package-filter-button" onClick={() => setPackageMenuOpen((open) => !open)}>
+              <Package size={16} />
+              包名 {activeTab.selectedPackages.length || ''}
+            </button>
+            {packageMenuOpen ? (
+              <div className="package-popover">
+                <div className="popover-header">
+                  <strong>包名 / 进程</strong>
+                  <button className="icon-button" onClick={() => setPackageMenuOpen(false)}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <label className="search-field popover-search">
+                  <Search size={16} />
+                  <input
+                    autoFocus
+                    onChange={(event) => setPackageSearch(event.target.value)}
+                    placeholder="搜索包名或进程"
+                    value={packageSearch}
+                  />
+                </label>
+                <div className="segmented-control">
+                  <button
+                    className={activeTab.packageSelectMode === 'single' ? 'active-toggle' : ''}
+                    onClick={() =>
+                      updateActiveTab((tab) => ({
+                        ...tab,
+                        packageSelectMode: 'single',
+                        selectedPackages: tab.selectedPackages.slice(0, 1),
+                      }))
+                    }
+                  >
+                    单选
+                  </button>
+                  <button
+                    className={activeTab.packageSelectMode === 'multiple' ? 'active-toggle' : ''}
+                    onClick={() => updateActiveTab((tab) => ({ ...tab, packageSelectMode: 'multiple' }))}
+                  >
+                    多选
+                  </button>
+                  <button onClick={() => updateActiveTab((tab) => ({ ...tab, selectedPackages: [] }))}>
+                    清除
+                  </button>
+                </div>
+                <div className="popover-actions">
+                  <span>{packages.length} 个进程</span>
+                  <button
+                    disabled={!activeTab.selectedSerial || activeTab.loadingProcesses}
+                    onClick={() => void refreshProcesses(activeTab.id, activeTab.selectedSerial)}
+                  >
+                    <RefreshCcw size={16} />
+                    {activeTab.loadingProcesses ? '读取中' : '刷新'}
+                  </button>
+                </div>
+                {activeTab.processError ? <span className="inline-error">{activeTab.processError}</span> : null}
+                <div className="package-option-list">
+                  {visiblePackages.length > 0 ? (
+                    visiblePackages.map((process) => {
+                      const checked = activeTab.selectedPackages.includes(process.name)
+                      return (
+                        <button
+                          className={`package-option ${checked ? 'selected' : ''}`}
+                          key={process.name}
+                          onClick={() => togglePackage(process.name)}
+                        >
+                          <input readOnly checked={checked} type={activeTab.packageSelectMode === 'single' ? 'radio' : 'checkbox'} />
+                          <span>
+                            <strong>{process.name}</strong>
+                            <small>pid {process.pid}</small>
+                          </span>
+                        </button>
+                      )
+                    })
+                  ) : (
+                    <div className="popover-empty">没有匹配进程</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}>
@@ -723,7 +825,7 @@ function App() {
           {visibleLogs.length > 0 ? (
             <div className="log-list" ref={logListRef}>
               {visibleLogs.map((entry) => (
-                <div className="log-row" key={entry.id} title={entry.raw}>
+                <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id} title={entry.raw}>
                   <span className="mono muted">{entry.timestamp || '-'}</span>
                   <span className={`level-badge ${levelClass(entry.level)}`}>
                     {LOG_LEVEL_LABELS[entry.level]}
