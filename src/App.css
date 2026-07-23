@@ -207,6 +207,16 @@
   color: #9f351a;
 }
 
+.notice.success {
+  border-color: #c7eadc;
+  background: #f2fbf7;
+  color: #0f5f45;
+}
+
+.notice.success strong {
+  color: #0f5f45;
+}
+
 .notice-dot {
   width: 10px;
   height: 10px;

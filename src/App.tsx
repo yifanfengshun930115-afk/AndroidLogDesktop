@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
   Play,
   RefreshCcw,
   Search,
@@ -10,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listAdbDevices } from './api/adb'
+import { exportLogs } from './api/exportLogs'
 import {
   listenLogcatBatch,
   listenLogcatError,
@@ -34,6 +36,10 @@ function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
 
+function formatExportContent(entries: LogEntry[]) {
+  return `${entries.map((entry) => entry.raw).join('\n')}\n`
+}
+
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
@@ -44,6 +50,9 @@ function App() {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [logError, setLogError] = useState('')
   const [isStarting, setIsStarting] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportPath, setExportPath] = useState('')
+  const [exportError, setExportError] = useState('')
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [searchText, setSearchText] = useState('')
   const sessionIdRef = useRef('')
@@ -135,6 +144,21 @@ function App() {
       sessionIdRef.current = ''
     }
   }, [])
+
+  const handleExportLogs = useCallback(async () => {
+    setExportPath('')
+    setExportError('')
+    setIsExporting(true)
+
+    try {
+      const result = await exportLogs(formatExportContent(filteredLogs))
+      setExportPath(result.filePath)
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsExporting(false)
+    }
+  }, [filteredLogs])
 
   useEffect(() => {
     void refreshDevices()
@@ -276,6 +300,10 @@ function App() {
               <Trash2 size={16} />
               清空
             </button>
+            <button disabled={filteredLogs.length === 0 || isExporting} onClick={handleExportLogs}>
+              <Download size={16} />
+              {isExporting ? '导出中' : '导出'}
+            </button>
           </div>
         </header>
 
@@ -295,6 +323,26 @@ function App() {
             <div>
               <strong>Logcat</strong>
               <span>{logError}</span>
+            </div>
+          </section>
+        ) : null}
+
+        {exportError ? (
+          <section className="notice danger">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>导出失败</strong>
+              <span>{exportError}</span>
+            </div>
+          </section>
+        ) : null}
+
+        {exportPath ? (
+          <section className="notice success">
+            <CheckCircle2 size={18} />
+            <div>
+              <strong>已导出</strong>
+              <span>{exportPath}</span>
             </div>
           </section>
         ) : null}

@@ -1,11 +1,11 @@
 use crate::adb::detect_adb_impl;
 use serde::Serialize;
 use std::{
-  io::{BufRead, BufReader},
-  process::{Child, Command, Stdio},
-  sync::Mutex,
-  thread,
-  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    io::{BufRead, BufReader},
+    process::{Child, Command, Stdio},
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -17,200 +17,205 @@ const BATCH_INTERVAL_MS: u64 = 120;
 
 #[derive(Default)]
 pub struct LogcatState {
-  process: Mutex<Option<LogcatProcess>>,
+    process: Mutex<Option<LogcatProcess>>,
 }
 
 struct LogcatProcess {
-  session_id: String,
-  child: Child,
+    session_id: String,
+    child: Child,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogcatSessionInfo {
-  session_id: String,
-  serial: String,
-  running: bool,
+    session_id: String,
+    serial: String,
+    running: bool,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogcatBatchPayload {
-  session_id: String,
-  lines: Vec<String>,
+    session_id: String,
+    lines: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogcatMessagePayload {
-  session_id: String,
-  message: String,
+    session_id: String,
+    message: String,
 }
 
 fn session_id() -> String {
-  SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_millis().to_string())
-    .unwrap_or_else(|_| "0".to_string())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 fn emit_batch(app: &AppHandle, session_id: &str, lines: &mut Vec<String>) {
-  if lines.is_empty() {
-    return;
-  }
+    if lines.is_empty() {
+        return;
+    }
 
-  let payload = LogcatBatchPayload {
-    session_id: session_id.to_string(),
-    lines: std::mem::take(lines),
-  };
-  let _ = app.emit(LOGCAT_BATCH_EVENT, payload);
+    let payload = LogcatBatchPayload {
+        session_id: session_id.to_string(),
+        lines: std::mem::take(lines),
+    };
+    let _ = app.emit(LOGCAT_BATCH_EVENT, payload);
 }
 
 fn emit_message(app: &AppHandle, event: &str, session_id: &str, message: impl Into<String>) {
-  let _ = app.emit(
-    event,
-    LogcatMessagePayload {
-      session_id: session_id.to_string(),
-      message: message.into(),
-    },
-  );
+    let _ = app.emit(
+        event,
+        LogcatMessagePayload {
+            session_id: session_id.to_string(),
+            message: message.into(),
+        },
+    );
 }
 
 fn stop_existing_process(state: &LogcatState) {
-  if let Some(mut process) = state.process.lock().ok().and_then(|mut guard| guard.take()) {
-    let _ = process.child.kill();
-    let _ = process.child.wait();
-  }
+    if let Some(mut process) = state.process.lock().ok().and_then(|mut guard| guard.take()) {
+        let _ = process.child.kill();
+        let _ = process.child.wait();
+    }
 }
 
 fn spawn_stdout_reader(
-  app: AppHandle,
-  session_id: String,
-  stdout: impl std::io::Read + Send + 'static,
+    app: AppHandle,
+    session_id: String,
+    stdout: impl std::io::Read + Send + 'static,
 ) {
-  thread::spawn(move || {
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
-    let mut last_emit = Instant::now();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut last_emit = Instant::now();
 
-    loop {
-      line.clear();
-      match reader.read_line(&mut line) {
-        Ok(0) => break,
-        Ok(_) => {
-          let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-          if !trimmed.is_empty() {
-            batch.push(trimmed);
-          }
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+                    if !trimmed.is_empty() {
+                        batch.push(trimmed);
+                    }
 
-          if batch.len() >= BATCH_SIZE
-            || last_emit.elapsed() >= Duration::from_millis(BATCH_INTERVAL_MS)
-          {
-            emit_batch(&app, &session_id, &mut batch);
-            last_emit = Instant::now();
-          }
+                    if batch.len() >= BATCH_SIZE
+                        || last_emit.elapsed() >= Duration::from_millis(BATCH_INTERVAL_MS)
+                    {
+                        emit_batch(&app, &session_id, &mut batch);
+                        last_emit = Instant::now();
+                    }
+                }
+                Err(error) => {
+                    emit_message(&app, LOGCAT_ERROR_EVENT, &session_id, error.to_string());
+                    break;
+                }
+            }
         }
-        Err(error) => {
-          emit_message(&app, LOGCAT_ERROR_EVENT, &session_id, error.to_string());
-          break;
-        }
-      }
-    }
 
-    emit_batch(&app, &session_id, &mut batch);
-    emit_message(&app, LOGCAT_STOPPED_EVENT, &session_id, "logcat stopped");
-  });
+        emit_batch(&app, &session_id, &mut batch);
+        emit_message(&app, LOGCAT_STOPPED_EVENT, &session_id, "logcat stopped");
+    });
 }
 
 fn spawn_stderr_reader(
-  app: AppHandle,
-  session_id: String,
-  stderr: impl std::io::Read + Send + 'static,
+    app: AppHandle,
+    session_id: String,
+    stderr: impl std::io::Read + Send + 'static,
 ) {
-  thread::spawn(move || {
-    let reader = BufReader::new(stderr);
-    for line in reader.lines().map_while(Result::ok) {
-      let message = line.trim();
-      if !message.is_empty() {
-        emit_message(&app, LOGCAT_ERROR_EVENT, &session_id, message.to_string());
-      }
-    }
-  });
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let message = line.trim();
+            if !message.is_empty() {
+                emit_message(&app, LOGCAT_ERROR_EVENT, &session_id, message.to_string());
+            }
+        }
+    });
 }
 
 #[tauri::command]
 pub fn start_logcat(
-  app: AppHandle,
-  state: State<'_, LogcatState>,
-  serial: String,
+    app: AppHandle,
+    state: State<'_, LogcatState>,
+    serial: String,
 ) -> Result<LogcatSessionInfo, String> {
-  let serial = serial.trim().to_string();
-  if serial.is_empty() {
-    return Err("请先选择一个在线设备".to_string());
-  }
+    let serial = serial.trim().to_string();
+    if serial.is_empty() {
+        return Err("请先选择一个在线设备".to_string());
+    }
 
-  let adb = detect_adb_impl(&app);
-  if !adb.is_available() {
-    return Err(adb.install_hint().to_string());
-  }
+    let adb = detect_adb_impl(&app);
+    if !adb.is_available() {
+        return Err(adb.install_hint().to_string());
+    }
 
-  let adb_path = adb
-    .binary_path()
-    .ok_or_else(|| adb.install_hint().to_string())?
-    .to_string();
+    let adb_path = adb
+        .binary_path()
+        .ok_or_else(|| adb.install_hint().to_string())?
+        .to_string();
 
-  stop_existing_process(&state);
+    stop_existing_process(&state);
 
-  let session_id = session_id();
-  let mut child = Command::new(adb_path)
-    .args(["-s", &serial, "logcat", "-v", "threadtime", "-T", "1"])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .map_err(|error| error.to_string())?;
+    let session_id = session_id();
+    let mut child = Command::new(adb_path)
+        .args(["-s", &serial, "logcat", "-v", "threadtime", "-T", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
 
-  let stdout = child
-    .stdout
-    .take()
-    .ok_or_else(|| "无法读取 logcat stdout".to_string())?;
-  let stderr = child
-    .stderr
-    .take()
-    .ok_or_else(|| "无法读取 logcat stderr".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 logcat stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 logcat stderr".to_string())?;
 
-  spawn_stdout_reader(app.clone(), session_id.clone(), stdout);
-  spawn_stderr_reader(app, session_id.clone(), stderr);
+    spawn_stdout_reader(app.clone(), session_id.clone(), stdout);
+    spawn_stderr_reader(app, session_id.clone(), stderr);
 
-  *state.process.lock().map_err(|error| error.to_string())? = Some(LogcatProcess {
-    session_id: session_id.clone(),
-    child,
-  });
+    *state.process.lock().map_err(|error| error.to_string())? = Some(LogcatProcess {
+        session_id: session_id.clone(),
+        child,
+    });
 
-  Ok(LogcatSessionInfo {
-    session_id,
-    serial,
-    running: true,
-  })
+    Ok(LogcatSessionInfo {
+        session_id,
+        serial,
+        running: true,
+    })
 }
 
 #[tauri::command]
 pub fn stop_logcat(state: State<'_, LogcatState>) -> Result<LogcatSessionInfo, String> {
-  let Some(mut process) = state.process.lock().map_err(|error| error.to_string())?.take() else {
-    return Ok(LogcatSessionInfo {
-      session_id: String::new(),
-      serial: String::new(),
-      running: false,
-    });
-  };
+    let Some(mut process) = state
+        .process
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take()
+    else {
+        return Ok(LogcatSessionInfo {
+            session_id: String::new(),
+            serial: String::new(),
+            running: false,
+        });
+    };
 
-  let session_id = process.session_id.clone();
-  let _ = process.child.kill();
-  let _ = process.child.wait();
+    let session_id = process.session_id.clone();
+    let _ = process.child.kill();
+    let _ = process.child.wait();
 
-  Ok(LogcatSessionInfo {
-    session_id,
-    serial: String::new(),
-    running: false,
-  })
+    Ok(LogcatSessionInfo {
+        session_id,
+        serial: String::new(),
+        running: false,
+    })
 }

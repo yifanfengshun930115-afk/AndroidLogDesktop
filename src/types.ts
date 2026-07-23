@@ -51,3 +51,8 @@ export interface LogEntry {
   message: string
   raw: string
 }
+
+export interface ExportResult {
+  filePath: string
+  sizeBytes: number
+}
