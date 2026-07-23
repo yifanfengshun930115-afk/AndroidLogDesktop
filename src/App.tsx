@@ -9,7 +9,7 @@ import {
   Trash2,
   Usb,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { listAdbDevices } from './api/adb'
 import { exportLogs } from './api/exportLogs'
 import {
@@ -20,13 +20,9 @@ import {
   stopLogcat,
 } from './api/logcat'
 import './App.css'
-import { LOG_LEVEL_LABELS, parseLogcatLine } from './logcat'
-import type { AdbDevice, AdbInfo, LogEntry, LogLevel, LogcatSessionInfo } from './types'
-
-const MAX_LOG_ENTRIES = 10000
-const DISPLAY_LIMIT = 1000
-
-type LevelFilter = 'all' | LogLevel
+import { LOG_LEVEL_LABELS } from './logcat'
+import { logStore, type LevelFilter } from './logStore'
+import type { AdbDevice, AdbInfo, LogLevel, LogcatSessionInfo } from './types'
 
 function deviceLabel(device: AdbDevice) {
   return device.description ? `${device.serial} ${device.description}` : device.serial
@@ -36,10 +32,6 @@ function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
 
-function formatExportContent(entries: LogEntry[]) {
-  return `${entries.map((entry) => entry.raw).join('\n')}\n`
-}
-
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
@@ -47,7 +39,6 @@ function App() {
   const [loadingDevices, setLoadingDevices] = useState(false)
   const [deviceError, setDeviceError] = useState('')
   const [session, setSession] = useState<LogcatSessionInfo>()
-  const [logs, setLogs] = useState<LogEntry[]>([])
   const [logError, setLogError] = useState('')
   const [isStarting, setIsStarting] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
@@ -56,7 +47,12 @@ function App() {
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [searchText, setSearchText] = useState('')
   const sessionIdRef = useRef('')
-  const nextLogIdRef = useRef(1)
+  const sessionDeviceSerialRef = useRef('')
+  const logSnapshot = useSyncExternalStore(
+    logStore.subscribe,
+    logStore.getSnapshot,
+    logStore.getSnapshot,
+  )
 
   const onlineDevices = useMemo(
     () => devices.filter((device) => device.state === 'device'),
@@ -64,21 +60,7 @@ function App() {
   )
   const selectedDevice = onlineDevices.find((device) => device.serial === selectedSerial)
   const isListening = Boolean(session?.running)
-
-  const filteredLogs = useMemo(() => {
-    const query = searchText.trim().toLowerCase()
-    return logs.filter((entry) => {
-      if (levelFilter !== 'all' && entry.level !== levelFilter) {
-        return false
-      }
-      if (!query) {
-        return true
-      }
-      return entry.raw.toLowerCase().includes(query)
-    })
-  }, [levelFilter, logs, searchText])
-
-  const visibleLogs = filteredLogs.slice(-DISPLAY_LIMIT)
+  const visibleLogs = logSnapshot.visibleEntries
 
   const refreshDevices = useCallback(async () => {
     setLoadingDevices(true)
@@ -116,19 +98,21 @@ function App() {
     }
 
     sessionIdRef.current = ''
-    nextLogIdRef.current = 1
-    setLogs([])
+    sessionDeviceSerialRef.current = ''
+    logStore.clear()
     setLogError('')
     setIsStarting(true)
 
     try {
       const nextSession = await startLogcat(selectedDevice.serial)
       sessionIdRef.current = nextSession.sessionId
+      sessionDeviceSerialRef.current = nextSession.serial
       setSession(nextSession)
     } catch (error) {
       setLogError(error instanceof Error ? error.message : String(error))
       setSession(undefined)
       sessionIdRef.current = ''
+      sessionDeviceSerialRef.current = ''
     } finally {
       setIsStarting(false)
     }
@@ -142,6 +126,7 @@ function App() {
     } finally {
       setSession(undefined)
       sessionIdRef.current = ''
+      sessionDeviceSerialRef.current = ''
     }
   }, [])
 
@@ -151,18 +136,25 @@ function App() {
     setIsExporting(true)
 
     try {
-      const result = await exportLogs(formatExportContent(filteredLogs))
+      const result = await exportLogs(logStore.getExportContent())
       setExportPath(result.filePath)
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error))
     } finally {
       setIsExporting(false)
     }
-  }, [filteredLogs])
+  }, [])
 
   useEffect(() => {
     void refreshDevices()
   }, [refreshDevices])
+
+  useEffect(() => {
+    logStore.setFilter({
+      level: levelFilter,
+      query: searchText,
+    })
+  }, [levelFilter, searchText])
 
   useEffect(() => {
     let disposed = false
@@ -170,31 +162,29 @@ function App() {
 
     Promise.all([
       listenLogcatBatch((payload) => {
-        if (sessionIdRef.current && payload.sessionId !== sessionIdRef.current) {
+        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
           return
         }
 
-        setLogs((current) => {
-          let nextId = nextLogIdRef.current
-          const nextEntries = payload.lines.map((line) =>
-            parseLogcatLine(line, payload.sessionId, nextId++),
-          )
-          nextLogIdRef.current = nextId
-          return [...current, ...nextEntries].slice(-MAX_LOG_ENTRIES)
+        logStore.appendRawBatch({
+          sessionId: payload.sessionId,
+          lines: payload.lines,
+          deviceSerial: sessionDeviceSerialRef.current || undefined,
         })
       }),
       listenLogcatError((payload) => {
-        if (sessionIdRef.current && payload.sessionId !== sessionIdRef.current) {
+        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
           return
         }
         setLogError(payload.message)
       }),
       listenLogcatStopped((payload) => {
-        if (sessionIdRef.current && payload.sessionId !== sessionIdRef.current) {
+        if (!sessionIdRef.current || payload.sessionId !== sessionIdRef.current) {
           return
         }
         setSession(undefined)
         sessionIdRef.current = ''
+        sessionDeviceSerialRef.current = ''
       }),
     ]).then((callbacks) => {
       if (disposed) {
@@ -265,11 +255,15 @@ function App() {
           <p className="section-label">当前会话</p>
           <div>
             <span>缓存</span>
-            <strong>{logs.length}</strong>
+            <strong>{logSnapshot.totalCount}</strong>
           </div>
           <div>
             <span>筛选结果</span>
-            <strong>{filteredLogs.length}</strong>
+            <strong>{logSnapshot.filteredCount}</strong>
+          </div>
+          <div>
+            <span>已淘汰</span>
+            <strong>{logSnapshot.droppedCount}</strong>
           </div>
         </section>
       </aside>
@@ -296,11 +290,11 @@ function App() {
                 {isStarting ? '启动中' : '开始监听'}
               </button>
             )}
-            <button disabled={logs.length === 0} onClick={() => setLogs([])}>
+            <button disabled={logSnapshot.totalCount === 0} onClick={() => logStore.clear()}>
               <Trash2 size={16} />
               清空
             </button>
-            <button disabled={filteredLogs.length === 0 || isExporting} onClick={handleExportLogs}>
+            <button disabled={logSnapshot.filteredCount === 0 || isExporting} onClick={handleExportLogs}>
               <Download size={16} />
               {isExporting ? '导出中' : '导出'}
             </button>
