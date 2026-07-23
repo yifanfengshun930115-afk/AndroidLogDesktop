@@ -1,6 +1,7 @@
 mod adb;
 mod export;
 mod logcat;
+mod transfer;
 
 use tauri::{Manager, WebviewWindowBuilder};
 
@@ -24,6 +25,7 @@ fn ensure_main_window(app: &mut tauri::App) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .manage(logcat::LogcatState::default())
+        .manage(transfer::TabTransferState::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -40,6 +42,9 @@ pub fn run() {
             adb::list_adb_devices,
             adb::list_adb_processes,
             export::export_logs,
+            transfer::clear_tab_transfer,
+            transfer::put_tab_transfer,
+            transfer::take_tab_transfer,
             logcat::start_logcat,
             logcat::stop_logcat
         ])

@@ -201,4 +201,31 @@ describe('LogStore', () => {
     store.appendRawBatch({ sessionId: 's1', lines: lines.slice(1, 2) })
     expect(store.getSnapshot()).not.toBe(first)
   })
+
+  it('exports and hydrates transfer entries with rebuilt indexes', () => {
+    const source = new LogStore({ capacity: 10, displayLimit: 10 })
+    source.appendRawBatch({
+      sessionId: 'session-a',
+      deviceSerial: 'device-a',
+      lines,
+    })
+
+    const target = new LogStore({ capacity: 3, displayLimit: 10 })
+    target.hydrateTransferEntries(source.getTransferEntries())
+    target.setQuery({
+      tags: ['crashtag'],
+      devices: ['device-a'],
+      includeText: 'fatal',
+    })
+
+    const snapshot = target.getSnapshot()
+    expect(snapshot.totalCount).toBe(3)
+    expect(snapshot.droppedCount).toBe(1)
+    expect(snapshot.visibleEntries.map((entry) => entry.raw)).toEqual([lines[2]])
+    expect(snapshot.visibleEntries[0]).toMatchObject({
+      sessionId: 'session-a',
+      deviceSerial: 'device-a',
+      tag: 'CrashTag',
+    })
+  })
 })

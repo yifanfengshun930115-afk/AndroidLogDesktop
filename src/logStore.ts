@@ -41,6 +41,12 @@ export interface AppendRawBatchOptions {
   deviceSerial?: string
 }
 
+export interface SerializedLogEntry {
+  raw: string
+  sessionId: string
+  deviceSerial?: string
+}
+
 export interface LogStoreSnapshot {
   version: number
   totalCount: number
@@ -331,6 +337,25 @@ export class LogStore {
     this.commitChange()
   }
 
+  hydrateTransferEntries(entries: SerializedLogEntry[]) {
+    if (entries.length === 0) {
+      return
+    }
+
+    let evicted = false
+    for (const entry of entries) {
+      evicted = this.appendEntry(
+        parseLogcatLine(entry.raw, entry.sessionId, this.nextSequence++, entry.deviceSerial),
+      ) || evicted
+    }
+
+    if (evicted) {
+      this.pruneIndexes()
+      this.trimStaleFilteredSequences()
+    }
+    this.commitChange()
+  }
+
   setFilter(filter: Partial<LogFilter>) {
     this.setQuery(queryFromFilter(filter))
   }
@@ -375,6 +400,17 @@ export class LogStore {
   getExportContent() {
     const entries = this.getFilteredEntries()
     return entries.length === 0 ? '' : `${entries.map((entry) => entry.raw).join('\n')}\n`
+  }
+
+  getTransferEntries(): SerializedLogEntry[] {
+    return this.allSequences()
+      .map((sequence) => this.getBySequence(sequence))
+      .filter((entry): entry is LogEntry => Boolean(entry))
+      .map((entry) => ({
+        raw: entry.raw,
+        sessionId: entry.sessionId,
+        deviceSerial: entry.deviceSerial,
+      }))
   }
 
   private appendEntry(entry: LogEntry) {

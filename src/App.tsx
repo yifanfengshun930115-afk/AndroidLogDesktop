@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Columns3,
   Download,
+  ExternalLink,
   ListFilter,
   Menu,
   Moon,
@@ -20,13 +21,18 @@ import {
   Sun,
   Tags,
   Trash2,
+  Undo2,
   Usb,
   WholeWord,
   WrapText,
   X,
 } from 'lucide-react'
+import { emitTo, listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -43,9 +49,10 @@ import {
   startLogcat,
   stopLogcat,
 } from './api/logcat'
+import { clearTabTransfer, putTabTransfer, takeTabTransfer } from './api/tabTransfer'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
-import { LogStore, logStore } from './logStore'
+import { LogStore, logStore, type SerializedLogEntry } from './logStore'
 import {
   compileSearchMatcher,
   findSearchMatchRanges,
@@ -81,6 +88,34 @@ interface LogTab {
 
 type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
 type LogField = 'time' | 'level' | 'process' | 'tag' | 'message'
+
+interface TabTransferPayload {
+  schemaVersion: 1
+  id: string
+  title: string
+  selectedSerial: string
+  paused: boolean
+  softWrap: boolean
+  selectedLevels: LogLevel[]
+  searchText: string
+  selectedTags: string[]
+  selectedPackages: string[]
+  visibleLogFields: LogField[]
+  searchOptions: LogSearchOptions
+  processes: AdbProcessInfo[]
+  processError: string
+  logEntries: SerializedLogEntry[]
+}
+
+interface TabTransferEventPayload {
+  transferId: string
+}
+
+interface InitialAppState {
+  tabs: LogTab[]
+  activeTabId: string
+  nextTabIndex: number
+}
 
 const LOG_COLOR_SCHEME_LABELS: Record<LogColorScheme, string> = {
   'android-studio': 'Android Studio',
@@ -118,6 +153,9 @@ const DEFAULT_LOG_FONT_SIZE = 12
 const DEFAULT_LOG_ROW_PADDING = 7
 const LOG_FONT_SIZE_RANGE = { min: 10, max: 18 }
 const LOG_ROW_PADDING_RANGE = { min: 3, max: 12 }
+const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
+const TAB_TRANSFER_SCHEMA_VERSION = 1
+const REATTACH_TAB_EVENT = 'tabs://reattach'
 
 const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWidth: number }> = {
   time: { nowrap: '150px', wrap: '150px', minWidth: 150 },
@@ -145,6 +183,152 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     processError: '',
     loadingProcesses: false,
   }
+}
+
+function createDetachedPlaceholderTab(transferId: string): LogTab {
+  return {
+    ...createLogTab(0),
+    id: `detached-${transferId || 'pending'}`,
+    title: '分离日志页',
+  }
+}
+
+function createInitialAppState(detachedTransferId: string): InitialAppState {
+  if (detachedTransferId) {
+    const tab = createDetachedPlaceholderTab(detachedTransferId)
+    return {
+      tabs: [tab],
+      activeTabId: tab.id,
+      nextTabIndex: 1,
+    }
+  }
+
+  const tab = createLogTab(1)
+  return {
+    tabs: [tab],
+    activeTabId: tab.id,
+    nextTabIndex: 2,
+  }
+}
+
+function readDetachedTransferId() {
+  try {
+    return new URLSearchParams(window.location.search).get(DETACHED_TAB_QUERY_PARAM)?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function normalizeLogFields(fields: LogField[]) {
+  const selected = new Set(fields.filter((field) => DEFAULT_LOG_FIELDS.includes(field)))
+  selected.add('message')
+  return DEFAULT_LOG_FIELDS.filter((field) => selected.has(field))
+}
+
+function serializeTabForTransfer(tab: LogTab): TabTransferPayload {
+  return {
+    schemaVersion: TAB_TRANSFER_SCHEMA_VERSION,
+    id: tab.id,
+    title: tab.title,
+    selectedSerial: tab.selectedSerial,
+    paused: false,
+    softWrap: tab.softWrap,
+    selectedLevels: [...tab.selectedLevels],
+    searchText: tab.searchText,
+    selectedTags: [...tab.selectedTags],
+    selectedPackages: [...tab.selectedPackages],
+    visibleLogFields: normalizeLogFields(tab.visibleLogFields),
+    searchOptions: { ...tab.searchOptions },
+    processes: [...tab.processes],
+    processError: tab.processError,
+    logEntries: tab.store.getTransferEntries(),
+  }
+}
+
+function parseTabTransferPayload(payloadText: string | null): TabTransferPayload | undefined {
+  if (!payloadText) {
+    return undefined
+  }
+
+  const payload = JSON.parse(payloadText) as Partial<TabTransferPayload>
+  if (payload.schemaVersion !== TAB_TRANSFER_SCHEMA_VERSION) {
+    throw new Error('日志页中转数据版本不匹配')
+  }
+  return payload as TabTransferPayload
+}
+
+function uniqueTabId(preferredId: string, existingIds: Set<string>) {
+  if (!existingIds.has(preferredId)) {
+    return preferredId
+  }
+
+  let index = 2
+  let nextId = `${preferredId}-${index}`
+  while (existingIds.has(nextId)) {
+    index += 1
+    nextId = `${preferredId}-${index}`
+  }
+  return nextId
+}
+
+function createTabFromTransferPayload(payload: TabTransferPayload, existingIds = new Set<string>()) {
+  const store = new LogStore()
+  store.hydrateTransferEntries(payload.logEntries ?? [])
+  return {
+    id: uniqueTabId(payload.id || `tab-${Date.now()}`, existingIds),
+    title: payload.title || 'Logcat',
+    store,
+    selectedSerial: payload.selectedSerial ?? '',
+    paused: false,
+    softWrap: Boolean(payload.softWrap),
+    selectedLevels: payload.selectedLevels ?? [],
+    searchText: payload.searchText ?? '',
+    selectedTags: payload.selectedTags ?? [],
+    selectedPackages: payload.selectedPackages ?? [],
+    visibleLogFields: normalizeLogFields(payload.visibleLogFields ?? DEFAULT_LOG_FIELDS),
+    searchOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.searchOptions },
+    processes: payload.processes ?? [],
+    processError: payload.processError ?? '',
+    loadingProcesses: false,
+  } satisfies LogTab
+}
+
+function nextLogcatIndex(tabs: LogTab[]) {
+  return Math.max(
+    2,
+    ...tabs.map((tab) => {
+      const match = tab.id.match(/^tab-(\d+)$/)
+      return match ? Number(match[1]) + 1 : 0
+    }),
+  )
+}
+
+function createTransferId(prefix: 'detached' | 'reattach', tabId: string) {
+  return `${prefix}-${tabId.replace(/[^a-zA-Z0-9-_:]/g, '-')}-${Date.now()}`
+}
+
+function detachedWindowUrl(transferId: string) {
+  return `index.html?${DETACHED_TAB_QUERY_PARAM}=${encodeURIComponent(transferId)}`
+}
+
+function waitForWindowCreated(window: WebviewWindow) {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const settle = (error?: unknown) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (error) {
+        reject(error instanceof Error ? error : new Error(String(error)))
+        return
+      }
+      resolve()
+    }
+
+    void window.once('tauri://created', () => settle())
+    void window.once<string>('tauri://error', (event) => settle(event.payload))
+  })
 }
 
 function parseDeviceDescription(description: string) {
@@ -300,6 +484,9 @@ function HighlightedText({
 }
 
 function App() {
+  const detachedTransferId = useMemo(() => readDetachedTransferId(), [])
+  const isDetachedWindow = detachedTransferId.length > 0
+  const [initialAppState] = useState(() => createInitialAppState(detachedTransferId))
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
   const [loadingDevices, setLoadingDevices] = useState(false)
@@ -334,10 +521,14 @@ function App() {
     ),
   )
   const [startingTabId, setStartingTabId] = useState('')
-  const [tabs, setTabs] = useState<LogTab[]>(() => [createLogTab(1)])
-  const [activeTabId, setActiveTabId] = useState('tab-1')
-  const nextTabIndexRef = useRef(2)
+  const [detachingTabId, setDetachingTabId] = useState('')
+  const [returningToMain, setReturningToMain] = useState(false)
+  const [dragOverTabId, setDragOverTabId] = useState('')
+  const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
+  const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
+  const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
   const tabsRef = useRef(tabs)
+  const draggedTabIdRef = useRef('')
   const logListRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
@@ -347,6 +538,96 @@ function App() {
   useEffect(() => {
     tabsRef.current = tabs
   }, [tabs])
+
+  useEffect(() => {
+    if (!isDetachedWindow) {
+      return undefined
+    }
+
+    let disposed = false
+
+    const loadDetachedTab = async () => {
+      try {
+        const payloadText = await takeTabTransfer(detachedTransferId)
+        const payload = parseTabTransferPayload(payloadText)
+        if (!payload) {
+          throw new Error('未找到分离日志页的中转数据')
+        }
+
+        const tab = createTabFromTransferPayload(payload)
+        if (disposed) {
+          return
+        }
+        setTabs([tab])
+        setActiveTabId(tab.id)
+        nextTabIndexRef.current = nextLogcatIndex([tab])
+      } catch (error) {
+        if (!disposed) {
+          setLogError(error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
+
+    void loadDetachedTab()
+    return () => {
+      disposed = true
+    }
+  }, [detachedTransferId, isDetachedWindow])
+
+  useEffect(() => {
+    if (isDetachedWindow) {
+      return undefined
+    }
+
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    listen<TabTransferEventPayload>(REATTACH_TAB_EVENT, async (event) => {
+      try {
+        const payloadText = await takeTabTransfer(event.payload.transferId)
+        const payload = parseTabTransferPayload(payloadText)
+        if (!payload) {
+          throw new Error('未找到回归日志页的中转数据')
+        }
+        if (disposed) {
+          return
+        }
+
+        setTabs((current) => {
+          const tab = createTabFromTransferPayload(
+            payload,
+            new Set(current.map((item) => item.id)),
+          )
+          const nextTabs = [...current, tab]
+          setActiveTabId(tab.id)
+          nextTabIndexRef.current = Math.max(nextTabIndexRef.current, nextLogcatIndex(nextTabs))
+          return nextTabs
+        })
+        setLogError('')
+      } catch (error) {
+        if (!disposed) {
+          setLogError(error instanceof Error ? error.message : String(error))
+        }
+      }
+    })
+      .then((callback) => {
+        if (disposed) {
+          callback()
+          return
+        }
+        unlisten = callback
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setLogError(error instanceof Error ? error.message : String(error))
+        }
+      })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [isDetachedWindow])
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]
   const activeStore = activeTab.store
@@ -700,13 +981,8 @@ function App() {
     setActiveTabId(tab.id)
   }, [onlineDevices])
 
-  const closeTab = useCallback(
+  const removeTabFromMain = useCallback(
     (tabId: string) => {
-      const tab = tabsRef.current.find((item) => item.id === tabId)
-      if (tab?.session?.sessionId) {
-        void stopLogcat(tab.session.sessionId)
-      }
-
       setTabs((current) => {
         if (current.length === 1) {
           const replacement = createLogTab(nextTabIndexRef.current, onlineDevices[0]?.serial ?? '')
@@ -722,6 +998,181 @@ function App() {
       })
     },
     [activeTabId, onlineDevices],
+  )
+
+  const closeTab = useCallback(
+    (tabId: string) => {
+      const tab = tabsRef.current.find((item) => item.id === tabId)
+      if (tab?.session?.sessionId) {
+        void stopLogcat(tab.session.sessionId)
+      }
+      removeTabFromMain(tabId)
+    },
+    [removeTabFromMain],
+  )
+
+  const moveTab = useCallback((sourceTabId: string, targetTabId: string, placement: 'before' | 'after') => {
+    if (!sourceTabId || sourceTabId === targetTabId) {
+      return
+    }
+
+    setTabs((current) => {
+      const sourceIndex = current.findIndex((tab) => tab.id === sourceTabId)
+      const targetIndex = current.findIndex((tab) => tab.id === targetTabId)
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return current
+      }
+
+      const sourceTab = current[sourceIndex]
+      const nextTabs = current.filter((tab) => tab.id !== sourceTabId)
+      const nextTargetIndex = nextTabs.findIndex((tab) => tab.id === targetTabId)
+      nextTabs.splice(placement === 'after' ? nextTargetIndex + 1 : nextTargetIndex, 0, sourceTab)
+      return nextTabs
+    })
+  }, [])
+
+  const detachTab = useCallback(
+    async (tabId: string) => {
+      if (isDetachedWindow || detachingTabId) {
+        return
+      }
+
+      const tab = tabsRef.current.find((item) => item.id === tabId)
+      if (!tab) {
+        return
+      }
+
+      let transferId = ''
+      setDetachingTabId(tabId)
+      setLogError('')
+
+      try {
+        if (tab.session?.sessionId) {
+          await stopLogcat(tab.session.sessionId)
+        }
+
+        const latestTab = tabsRef.current.find((item) => item.id === tabId) ?? tab
+        const payload = serializeTabForTransfer({
+          ...latestTab,
+          session: undefined,
+          paused: false,
+        })
+        transferId = createTransferId('detached', tabId)
+        await putTabTransfer(transferId, JSON.stringify(payload))
+
+        const detachedWindow = new WebviewWindow(transferId, {
+          url: detachedWindowUrl(transferId),
+          title: payload.title,
+          width: 1280,
+          height: 820,
+          minWidth: 1040,
+          minHeight: 680,
+          resizable: true,
+        })
+        await waitForWindowCreated(detachedWindow)
+        removeTabFromMain(tabId)
+      } catch (error) {
+        if (transferId) {
+          void clearTabTransfer(transferId)
+        }
+        setLogError(error instanceof Error ? error.message : String(error))
+      } finally {
+        setDetachingTabId('')
+      }
+    },
+    [detachingTabId, isDetachedWindow, removeTabFromMain],
+  )
+
+  const returnTabToMain = useCallback(async () => {
+    if (!isDetachedWindow || returningToMain) {
+      return
+    }
+
+    let transferId = ''
+    setReturningToMain(true)
+    setLogError('')
+
+    try {
+      if (activeTab.session?.sessionId) {
+        await stopLogcat(activeTab.session.sessionId)
+      }
+
+      const payload = serializeTabForTransfer({
+        ...activeTab,
+        session: undefined,
+        paused: false,
+      })
+      transferId = createTransferId('reattach', activeTab.id)
+      await putTabTransfer(transferId, JSON.stringify(payload))
+      await emitTo<TabTransferEventPayload>('main', REATTACH_TAB_EVENT, { transferId })
+      await getCurrentWindow().close()
+    } catch (error) {
+      if (transferId) {
+        void clearTabTransfer(transferId)
+      }
+      setLogError(error instanceof Error ? error.message : String(error))
+      setReturningToMain(false)
+    }
+  }, [activeTab, isDetachedWindow, returningToMain])
+
+  const handleTabDragStart = useCallback(
+    (event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+      if (isDetachedWindow || detachingTabId) {
+        event.preventDefault()
+        return
+      }
+
+      draggedTabIdRef.current = tabId
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', tabId)
+    },
+    [detachingTabId, isDetachedWindow],
+  )
+
+  const handleTabDragOver = useCallback((event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+    const sourceTabId = draggedTabIdRef.current
+    if (!sourceTabId || sourceTabId === tabId) {
+      return
+    }
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    setDragOverTabId(tabId)
+  }, [])
+
+  const handleTabDrop = useCallback(
+    (event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+      event.preventDefault()
+      const targetBounds = event.currentTarget.getBoundingClientRect()
+      const placement = event.clientX > targetBounds.left + targetBounds.width / 2 ? 'after' : 'before'
+      moveTab(draggedTabIdRef.current, tabId, placement)
+      draggedTabIdRef.current = ''
+      setDragOverTabId('')
+    },
+    [moveTab],
+  )
+
+  const handleTabDragEnd = useCallback(
+    (event: ReactDragEvent<HTMLButtonElement>) => {
+      const tabId = draggedTabIdRef.current
+      draggedTabIdRef.current = ''
+      setDragOverTabId('')
+
+      const endedOutsideWindow =
+        event.clientX < 0 ||
+        event.clientY < 0 ||
+        event.clientX > window.innerWidth ||
+        event.clientY > window.innerHeight ||
+        event.screenX < window.screenX ||
+        event.screenY < window.screenY ||
+        event.screenX > window.screenX + window.outerWidth ||
+        event.screenY > window.screenY + window.outerHeight
+
+      if (tabId && endedOutsideWindow) {
+        void detachTab(tabId)
+      }
+    },
+    [detachTab],
   )
 
   useEffect(() => {
@@ -799,7 +1250,11 @@ function App() {
     return () => {
       disposed = true
       unlistenCallbacks.forEach((callback) => callback())
-      void stopLogcat()
+      for (const tab of tabsRef.current) {
+        if (tab.session?.sessionId) {
+          void stopLogcat(tab.session.sessionId)
+        }
+      }
     }
   }, [updateTab])
 
@@ -956,24 +1411,55 @@ function App() {
         <div className="tab-strip">
           {tabs.map((tab) => (
             <button
-              className={`tab-button ${tab.id === activeTab.id ? 'active' : ''}`}
+              className={`tab-button ${tab.id === activeTab.id ? 'active' : ''} ${
+                dragOverTabId === tab.id ? 'drag-over' : ''
+              } ${detachingTabId === tab.id ? 'pending' : ''}`}
+              draggable={!isDetachedWindow && !detachingTabId}
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
+              onDragEnd={handleTabDragEnd}
+              onDragLeave={() => {
+                if (dragOverTabId === tab.id) {
+                  setDragOverTabId('')
+                }
+              }}
+              onDragOver={(event) => handleTabDragOver(event, tab.id)}
+              onDragStart={(event) => handleTabDragStart(event, tab.id)}
+              onDrop={(event) => handleTabDrop(event, tab.id)}
             >
               <span>{tab.title}</span>
-              {tab.session?.running ? <small>{tab.paused ? '暂停' : '运行'}</small> : null}
-              <X
-                size={14}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  closeTab(tab.id)
-                }}
-              />
+              {detachingTabId === tab.id ? (
+                <small>分离中</small>
+              ) : tab.session?.running ? (
+                <small>{tab.paused ? '暂停' : '运行'}</small>
+              ) : null}
+              {!isDetachedWindow ? (
+                <>
+                  <ExternalLink
+                    className="tab-action-icon"
+                    size={14}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void detachTab(tab.id)
+                    }}
+                  />
+                  <X
+                    className="tab-action-icon"
+                    size={14}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      closeTab(tab.id)
+                    }}
+                  />
+                </>
+              ) : null}
             </button>
           ))}
-          <button className="tab-add" onClick={addTab}>
-            <Plus size={16} />
-          </button>
+          {!isDetachedWindow ? (
+            <button className="tab-add" onClick={addTab}>
+              <Plus size={16} />
+            </button>
+          ) : null}
         </div>
 
         <header className="toolbar">
@@ -987,6 +1473,12 @@ function App() {
             </div>
           </div>
           <div className="toolbar-actions">
+            {isDetachedWindow ? (
+              <button className="primary" disabled={returningToMain} onClick={returnTabToMain}>
+                <Undo2 size={16} />
+                {returningToMain ? '回归中' : '回归主窗'}
+              </button>
+            ) : null}
             <button disabled={!selectedDevice || isStarting} onClick={handleStartPause}>
               {isRunning && !activeTab.paused ? <Pause size={16} /> : <Play size={16} />}
               {!isRunning ? (isStarting ? '启动中' : '开始') : activeTab.paused ? '继续' : '暂停'}
