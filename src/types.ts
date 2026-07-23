@@ -42,14 +42,19 @@ export interface LogcatMessagePayload {
 
 export interface LogEntry {
   id: number
+  sequence: number
   sessionId: string
+  deviceSerial?: string
   timestamp: string
+  timestampEpochMs?: number
   pid: string
   tid: string
   level: LogLevel
   tag: string
   message: string
   raw: string
+  searchText: string
+  isCrash: boolean
 }
 
 export interface ExportResult {
