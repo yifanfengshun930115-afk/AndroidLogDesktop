@@ -23,14 +23,28 @@
   --color-purple-soft: #f0edf8;
   --color-overlay: rgba(23, 32, 51, 0.16);
   --shadow-popover: 0 18px 50px rgba(23, 32, 51, 0.18);
-  --log-row-hover: #f9fafc;
+  --log-row-hover: #f4f7fb;
+  --log-verbose-fg: #6b7280;
+  --log-debug-fg: #1976d2;
+  --log-info-fg: #2e7d32;
+  --log-warn-fg: #9a5b00;
+  --log-error-fg: #d32f2f;
+  --log-fatal-fg: #8e24aa;
+  --log-raw-fg: #546e7a;
   --log-verbose-bg: #f8fafc;
-  --log-debug-bg: #f2fbf7;
-  --log-info-bg: #f4f8ff;
-  --log-warn-bg: #fff9ef;
-  --log-error-bg: #fff5f2;
-  --log-fatal-bg: #fff0ec;
-  --log-raw-bg: #faf7ff;
+  --log-debug-bg: #f1f8ff;
+  --log-info-bg: #f3fbf4;
+  --log-warn-bg: #fffaf0;
+  --log-error-bg: #fff4f4;
+  --log-fatal-bg: #fbf2ff;
+  --log-raw-bg: #f7fafb;
+  --log-verbose-chip-bg: #eef2f7;
+  --log-debug-chip-bg: #e3f2fd;
+  --log-info-chip-bg: #e8f5e9;
+  --log-warn-chip-bg: #fff4d6;
+  --log-error-chip-bg: #ffebee;
+  --log-fatal-chip-bg: #f3e5f5;
+  --log-raw-chip-bg: #eceff1;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -67,14 +81,128 @@
   --color-purple-soft: #271f3a;
   --color-overlay: rgba(2, 6, 12, 0.56);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.42);
-  --log-row-hover: #1b2431;
+  --log-row-hover: #1f2b3a;
+  --log-verbose-fg: #9e9e9e;
+  --log-debug-fg: #64b5f6;
+  --log-info-fg: #81c784;
+  --log-warn-fg: #ffd54f;
+  --log-error-fg: #ef5350;
+  --log-fatal-fg: #ce93d8;
+  --log-raw-fg: #90a4ae;
   --log-verbose-bg: #121923;
-  --log-debug-bg: #10251d;
-  --log-info-bg: #122236;
+  --log-debug-bg: #0f1e2d;
+  --log-info-bg: #102317;
   --log-warn-bg: #2a2112;
   --log-error-bg: #301914;
-  --log-fatal-bg: #3a1712;
-  --log-raw-bg: #211a30;
+  --log-fatal-bg: #281932;
+  --log-raw-bg: #16222a;
+  --log-verbose-chip-bg: #2a313d;
+  --log-debug-chip-bg: #123150;
+  --log-info-chip-bg: #14351d;
+  --log-warn-chip-bg: #3b2b11;
+  --log-error-chip-bg: #421d18;
+  --log-fatal-chip-bg: #3a2248;
+  --log-raw-chip-bg: #23313a;
+}
+
+:root[data-log-scheme='idea'] {
+  --log-row-hover: #f5f6f7;
+  --log-verbose-fg: #7a7f87;
+  --log-debug-fg: #4e7d32;
+  --log-info-fg: #326a9a;
+  --log-warn-fg: #8f7500;
+  --log-error-fg: #b33a3a;
+  --log-fatal-fg: #8c5a9e;
+  --log-raw-fg: #5f6670;
+  --log-verbose-bg: #f8f8f8;
+  --log-debug-bg: #f4f8ef;
+  --log-info-bg: #f1f6fb;
+  --log-warn-bg: #fbf8eb;
+  --log-error-bg: #fbf1f1;
+  --log-fatal-bg: #f8f1fb;
+  --log-raw-bg: #f6f7f8;
+  --log-verbose-chip-bg: #eceef1;
+  --log-debug-chip-bg: #e8f0df;
+  --log-info-chip-bg: #e2edf7;
+  --log-warn-chip-bg: #f4edcf;
+  --log-error-chip-bg: #f5dddd;
+  --log-fatal-chip-bg: #eddef4;
+  --log-raw-chip-bg: #e9ebee;
+}
+
+:root[data-theme='dark'][data-log-scheme='idea'] {
+  --log-row-hover: #313335;
+  --log-verbose-fg: #808080;
+  --log-debug-fg: #a5c261;
+  --log-info-fg: #6897bb;
+  --log-warn-fg: #bbb529;
+  --log-error-fg: #bc3f3c;
+  --log-fatal-fg: #9876aa;
+  --log-raw-fg: #a9b7c6;
+  --log-verbose-bg: #252628;
+  --log-debug-bg: #263020;
+  --log-info-bg: #202b35;
+  --log-warn-bg: #302e1d;
+  --log-error-bg: #351f20;
+  --log-fatal-bg: #2e2635;
+  --log-raw-bg: #282b30;
+  --log-verbose-chip-bg: #3a3d40;
+  --log-debug-chip-bg: #354226;
+  --log-info-chip-bg: #2d3e4e;
+  --log-warn-chip-bg: #464321;
+  --log-error-chip-bg: #4b2829;
+  --log-fatal-chip-bg: #41324d;
+  --log-raw-chip-bg: #3a4047;
+}
+
+:root[data-log-scheme='vscode'] {
+  --log-row-hover: #f2f2f2;
+  --log-verbose-fg: #6e7681;
+  --log-debug-fg: #2ea043;
+  --log-info-fg: #005fb8;
+  --log-warn-fg: #895503;
+  --log-error-fg: #c72e0f;
+  --log-fatal-fg: #a31515;
+  --log-raw-fg: #795e26;
+  --log-verbose-bg: #fafafa;
+  --log-debug-bg: #f0f8f1;
+  --log-info-bg: #f0f6ff;
+  --log-warn-bg: #fff8eb;
+  --log-error-bg: #fff2f0;
+  --log-fatal-bg: #fff0f0;
+  --log-raw-bg: #fff9ef;
+  --log-verbose-chip-bg: #e5e5e5;
+  --log-debug-chip-bg: #ddf4df;
+  --log-info-chip-bg: #dbeafe;
+  --log-warn-chip-bg: #f8e6bf;
+  --log-error-chip-bg: #ffdad5;
+  --log-fatal-chip-bg: #ffd6d6;
+  --log-raw-chip-bg: #f3e7cf;
+}
+
+:root[data-theme='dark'][data-log-scheme='vscode'] {
+  --log-row-hover: #2b2b2b;
+  --log-verbose-fg: #8b949e;
+  --log-debug-fg: #6a9955;
+  --log-info-fg: #58a6ff;
+  --log-warn-fg: #d29922;
+  --log-error-fg: #f85149;
+  --log-fatal-fg: #ff7b72;
+  --log-raw-fg: #c586c0;
+  --log-verbose-bg: #202020;
+  --log-debug-bg: #1d2a1f;
+  --log-info-bg: #182434;
+  --log-warn-bg: #2a2318;
+  --log-error-bg: #301c1c;
+  --log-fatal-bg: #371c1c;
+  --log-raw-bg: #2b2130;
+  --log-verbose-chip-bg: #313131;
+  --log-debug-chip-bg: #263a28;
+  --log-info-chip-bg: #20364f;
+  --log-warn-chip-bg: #3a2e1a;
+  --log-error-chip-bg: #4a2424;
+  --log-fatal-chip-bg: #552525;
+  --log-raw-chip-bg: #3d2d44;
 }
 
 * {

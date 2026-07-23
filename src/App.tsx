@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   Sun,
+  Tags,
   Trash2,
   Usb,
   WrapText,
@@ -58,11 +59,20 @@ interface LogTab {
   levelFilter: LevelFilter
   searchText: string
   selectedTags: string[]
+  tagSelectMode: 'single' | 'multiple'
   selectedPackages: string[]
   packageSelectMode: 'single' | 'multiple'
   processes: AdbProcessInfo[]
   processError: string
   loadingProcesses: boolean
+}
+
+type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
+
+const LOG_COLOR_SCHEME_LABELS: Record<LogColorScheme, string> = {
+  'android-studio': 'Android Studio',
+  idea: 'IntelliJ IDEA',
+  vscode: 'VS Code',
 }
 
 function createLogTab(index: number, selectedSerial = ''): LogTab {
@@ -76,6 +86,7 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     levelFilter: 'all',
     searchText: '',
     selectedTags: [],
+    tagSelectMode: 'multiple',
     selectedPackages: [],
     packageSelectMode: 'multiple',
     processes: [],
@@ -108,12 +119,6 @@ function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
 
-function selectedOptions(options: HTMLCollectionOf<HTMLOptionElement>) {
-  return Array.from(options)
-    .filter((option) => option.selected)
-    .map((option) => option.value)
-}
-
 function packageOptions(processes: AdbProcessInfo[]) {
   const seen = new Set<string>()
   return processes
@@ -143,6 +148,14 @@ function filterPackageOptions(processes: AdbProcessInfo[], query: string) {
   return options.filter((process) => process.name.toLowerCase().includes(normalizedQuery))
 }
 
+function filterTextOptions(options: string[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) {
+    return options
+  }
+  return options.filter((option) => option.toLowerCase().includes(normalizedQuery))
+}
+
 function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo>()
   const [devices, setDevices] = useState<AdbDevice[]>([])
@@ -155,7 +168,10 @@ function App() {
   const [drawerOpen, setDrawerOpen] = useState(true)
   const [packageMenuOpen, setPackageMenuOpen] = useState(false)
   const [packageSearch, setPackageSearch] = useState('')
+  const [tagMenuOpen, setTagMenuOpen] = useState(false)
+  const [tagSearch, setTagSearch] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>('android-studio')
   const [startingTabId, setStartingTabId] = useState('')
   const [tabs, setTabs] = useState<LogTab[]>(() => [createLogTab(1)])
   const [activeTabId, setActiveTabId] = useState('tab-1')
@@ -185,14 +201,21 @@ function App() {
   const visibleLogs = logSnapshot.visibleEntries
   const packages = packageOptions(activeTab.processes)
   const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
+  const visibleTags = filterTextOptions(logSnapshot.tagOptions, tagSearch)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
   useEffect(() => {
+    document.documentElement.dataset.logScheme = logColorScheme
+  }, [logColorScheme])
+
+  useEffect(() => {
     setPackageMenuOpen(false)
     setPackageSearch('')
+    setTagMenuOpen(false)
+    setTagSearch('')
   }, [activeTabId])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
@@ -359,6 +382,30 @@ function App() {
     [updateActiveTab],
   )
 
+  const toggleTag = useCallback(
+    (tag: string) => {
+      updateActiveTab((tab) => {
+        if (tab.tagSelectMode === 'single') {
+          return {
+            ...tab,
+            selectedTags: tab.selectedTags[0] === tag ? [] : [tag],
+          }
+        }
+        const selected = new Set(tab.selectedTags)
+        if (selected.has(tag)) {
+          selected.delete(tag)
+        } else {
+          selected.add(tag)
+        }
+        return {
+          ...tab,
+          selectedTags: [...selected],
+        }
+      })
+    },
+    [updateActiveTab],
+  )
+
   const addTab = useCallback(() => {
     const nextIndex = nextTabIndexRef.current
     nextTabIndexRef.current += 1
@@ -492,6 +539,17 @@ function App() {
             {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
             {theme === 'light' ? '切换暗色' : '切换亮色'}
           </button>
+          <select
+            className="theme-select"
+            onChange={(event) => setLogColorScheme(event.target.value as LogColorScheme)}
+            value={logColorScheme}
+          >
+            {Object.entries(LOG_COLOR_SCHEME_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                日志配色：{label}
+              </option>
+            ))}
+          </select>
         </section>
 
         <section className="sidebar-section">
@@ -534,27 +592,6 @@ function App() {
           ) : (
             <div className="device-empty">未连接可用设备</div>
           )}
-        </section>
-
-        <section className="sidebar-section">
-          <p className="section-label">Tag</p>
-          <select
-            className="multi-select"
-            multiple
-            onChange={(event) =>
-              updateActiveTab((tab) => ({
-                ...tab,
-                selectedTags: selectedOptions(event.currentTarget.selectedOptions),
-              }))
-            }
-            value={activeTab.selectedTags}
-          >
-            {logSnapshot.tagOptions.map((tag) => (
-              <option key={tag} value={tag}>
-                {tag}
-              </option>
-            ))}
-          </select>
         </section>
 
         <section className="sidebar-section">
@@ -710,41 +747,19 @@ function App() {
         ) : null}
 
         <div className="filter-row">
-          <label className="search-field">
-            <Search size={16} />
-            <input
-              onChange={(event) =>
-                updateActiveTab((tab) => ({ ...tab, searchText: event.target.value }))
-              }
-              placeholder="搜索日志、Tag、包名"
-              value={activeTab.searchText}
-            />
-          </label>
-          <select
-            onChange={(event) =>
-              updateActiveTab((tab) => ({
-                ...tab,
-                levelFilter: event.target.value as LevelFilter,
-              }))
-            }
-            value={activeTab.levelFilter}
-          >
-            <option value="all">全部级别</option>
-            <option value="F">Fatal</option>
-            <option value="E">Error</option>
-            <option value="W">Warn</option>
-            <option value="I">Info</option>
-            <option value="D">Debug</option>
-            <option value="V">Verbose</option>
-            <option value="?">Raw</option>
-          </select>
-          <div className="package-filter">
-            <button className="package-filter-button" onClick={() => setPackageMenuOpen((open) => !open)}>
+          <div className="filter-popover-anchor">
+            <button
+              className="filter-trigger"
+              onClick={() => {
+                setPackageMenuOpen((open) => !open)
+                setTagMenuOpen(false)
+              }}
+            >
               <Package size={16} />
               包名 {activeTab.selectedPackages.length || ''}
             </button>
             {packageMenuOpen ? (
-              <div className="package-popover">
+              <div className="filter-popover">
                 <div className="popover-header">
                   <strong>包名 / 进程</strong>
                   <button className="icon-button" onClick={() => setPackageMenuOpen(false)}>
@@ -794,17 +809,21 @@ function App() {
                   </button>
                 </div>
                 {activeTab.processError ? <span className="inline-error">{activeTab.processError}</span> : null}
-                <div className="package-option-list">
+                <div className="filter-option-list">
                   {visiblePackages.length > 0 ? (
                     visiblePackages.map((process) => {
                       const checked = activeTab.selectedPackages.includes(process.name)
                       return (
                         <button
-                          className={`package-option ${checked ? 'selected' : ''}`}
+                          className={`filter-option ${checked ? 'selected' : ''}`}
                           key={process.name}
                           onClick={() => togglePackage(process.name)}
                         >
-                          <input readOnly checked={checked} type={activeTab.packageSelectMode === 'single' ? 'radio' : 'checkbox'} />
+                          <input
+                            readOnly
+                            checked={checked}
+                            type={activeTab.packageSelectMode === 'single' ? 'radio' : 'checkbox'}
+                          />
                           <span>
                             <strong>{process.name}</strong>
                             <small>pid {process.pid}</small>
@@ -819,6 +838,116 @@ function App() {
               </div>
             ) : null}
           </div>
+          <div className="filter-popover-anchor">
+            <button
+              className="filter-trigger"
+              onClick={() => {
+                setTagMenuOpen((open) => !open)
+                setPackageMenuOpen(false)
+              }}
+            >
+              <Tags size={16} />
+              Tag {activeTab.selectedTags.length || ''}
+            </button>
+            {tagMenuOpen ? (
+              <div className="filter-popover">
+                <div className="popover-header">
+                  <strong>Tag</strong>
+                  <button className="icon-button" onClick={() => setTagMenuOpen(false)}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <label className="search-field popover-search">
+                  <Search size={16} />
+                  <input
+                    autoFocus
+                    onChange={(event) => setTagSearch(event.target.value)}
+                    placeholder="搜索 Tag"
+                    value={tagSearch}
+                  />
+                </label>
+                <div className="segmented-control">
+                  <button
+                    className={activeTab.tagSelectMode === 'single' ? 'active-toggle' : ''}
+                    onClick={() =>
+                      updateActiveTab((tab) => ({
+                        ...tab,
+                        tagSelectMode: 'single',
+                        selectedTags: tab.selectedTags.slice(0, 1),
+                      }))
+                    }
+                  >
+                    单选
+                  </button>
+                  <button
+                    className={activeTab.tagSelectMode === 'multiple' ? 'active-toggle' : ''}
+                    onClick={() => updateActiveTab((tab) => ({ ...tab, tagSelectMode: 'multiple' }))}
+                  >
+                    多选
+                  </button>
+                  <button onClick={() => updateActiveTab((tab) => ({ ...tab, selectedTags: [] }))}>
+                    清除
+                  </button>
+                </div>
+                <div className="popover-actions">
+                  <span>{logSnapshot.tagOptions.length} 个 Tag</span>
+                </div>
+                <div className="filter-option-list">
+                  {visibleTags.length > 0 ? (
+                    visibleTags.map((tag) => {
+                      const checked = activeTab.selectedTags.includes(tag)
+                      return (
+                        <button
+                          className={`filter-option compact ${checked ? 'selected' : ''}`}
+                          key={tag}
+                          onClick={() => toggleTag(tag)}
+                        >
+                          <input
+                            readOnly
+                            checked={checked}
+                            type={activeTab.tagSelectMode === 'single' ? 'radio' : 'checkbox'}
+                          />
+                          <span>
+                            <strong>{tag}</strong>
+                          </span>
+                        </button>
+                      )
+                    })
+                  ) : (
+                    <div className="popover-empty">没有匹配 Tag</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <label className="search-field">
+            <Search size={16} />
+            <input
+              onChange={(event) =>
+                updateActiveTab((tab) => ({ ...tab, searchText: event.target.value }))
+              }
+              placeholder="搜索日志内容"
+              value={activeTab.searchText}
+            />
+          </label>
+          <select
+            onChange={(event) =>
+              updateActiveTab((tab) => ({
+                ...tab,
+                levelFilter: event.target.value as LevelFilter,
+              }))
+            }
+            value={activeTab.levelFilter}
+          >
+            <option value="all">全部级别</option>
+            <option value="F">Fatal</option>
+            <option value="E">Error</option>
+            <option value="W">Warn</option>
+            <option value="I">Info</option>
+            <option value="D">Debug</option>
+            <option value="V">Verbose</option>
+            <option value="?">Raw</option>
+          </select>
         </div>
 
         <div className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}>
