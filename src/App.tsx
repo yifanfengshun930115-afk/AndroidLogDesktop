@@ -112,6 +112,12 @@ const DEFAULT_SEARCH_OPTIONS: LogSearchOptions = {
   wholeWords: false,
   regex: false,
 }
+const LOG_FONT_SIZE_STORAGE_KEY = 'android-log-desktop.logFontSize'
+const LOG_ROW_PADDING_STORAGE_KEY = 'android-log-desktop.logRowPadding'
+const DEFAULT_LOG_FONT_SIZE = 12
+const DEFAULT_LOG_ROW_PADDING = 7
+const LOG_FONT_SIZE_RANGE = { min: 10, max: 18 }
+const LOG_ROW_PADDING_RANGE = { min: 3, max: 12 }
 
 const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWidth: number }> = {
   time: { nowrap: '150px', wrap: '150px', minWidth: 150 },
@@ -228,6 +234,34 @@ function buildLogMinWidth(fields: LogField[], softWrap: boolean) {
   return `${Math.max(minWidth, 260)}px`
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min
+  }
+  return Math.min(Math.max(value, min), max)
+}
+
+function readNumberPreference(key: string, fallback: number, min: number, max: number) {
+  try {
+    const storedValue = window.localStorage.getItem(key)
+    if (storedValue === null) {
+      return fallback
+    }
+    const value = Number(storedValue)
+    return Number.isFinite(value) ? clampNumber(value, min, max) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeNumberPreference(key: string, value: number) {
+  try {
+    window.localStorage.setItem(key, String(value))
+  } catch {
+    // Non-critical preference persistence can be unavailable in restricted WebViews.
+  }
+}
+
 function HighlightedText({
   className,
   matcher,
@@ -283,6 +317,22 @@ function App() {
   const [contentMenuOpen, setContentMenuOpen] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>('android-studio')
+  const [logFontSize, setLogFontSize] = useState(() =>
+    readNumberPreference(
+      LOG_FONT_SIZE_STORAGE_KEY,
+      DEFAULT_LOG_FONT_SIZE,
+      LOG_FONT_SIZE_RANGE.min,
+      LOG_FONT_SIZE_RANGE.max,
+    ),
+  )
+  const [logRowPadding, setLogRowPadding] = useState(() =>
+    readNumberPreference(
+      LOG_ROW_PADDING_STORAGE_KEY,
+      DEFAULT_LOG_ROW_PADDING,
+      LOG_ROW_PADDING_RANGE.min,
+      LOG_ROW_PADDING_RANGE.max,
+    ),
+  )
   const [startingTabId, setStartingTabId] = useState('')
   const [tabs, setTabs] = useState<LogTab[]>(() => [createLogTab(1)])
   const [activeTabId, setActiveTabId] = useState('tab-1')
@@ -326,8 +376,10 @@ function App() {
       ({
         '--log-grid-columns': buildLogGridColumns(activeTab.visibleLogFields, activeTab.softWrap),
         '--log-min-width': buildLogMinWidth(activeTab.visibleLogFields, activeTab.softWrap),
+        '--log-font-size': `${logFontSize}px`,
+        '--log-row-padding': `${logRowPadding}px`,
       }) as CSSProperties,
-    [activeTab.softWrap, activeTab.visibleLogFields],
+    [activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
   )
 
   useEffect(() => {
@@ -337,6 +389,14 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.logScheme = logColorScheme
   }, [logColorScheme])
+
+  useEffect(() => {
+    writeNumberPreference(LOG_FONT_SIZE_STORAGE_KEY, logFontSize)
+  }, [logFontSize])
+
+  useEffect(() => {
+    writeNumberPreference(LOG_ROW_PADDING_STORAGE_KEY, logRowPadding)
+  }, [logRowPadding])
 
   useEffect(() => {
     setPackageMenuOpen(false)
@@ -778,6 +838,50 @@ function App() {
               </option>
             ))}
           </select>
+          <label className="preference-control">
+            <span className="preference-heading">
+              <span>日志字号</span>
+              <strong>{logFontSize}px</strong>
+            </span>
+            <input
+              max={LOG_FONT_SIZE_RANGE.max}
+              min={LOG_FONT_SIZE_RANGE.min}
+              onChange={(event) =>
+                setLogFontSize(
+                  clampNumber(Number(event.target.value), LOG_FONT_SIZE_RANGE.min, LOG_FONT_SIZE_RANGE.max),
+                )
+              }
+              step={1}
+              type="range"
+              value={logFontSize}
+            />
+            <span className="preference-scale">
+              <span>小</span>
+              <span>大</span>
+            </span>
+          </label>
+          <label className="preference-control">
+            <span className="preference-heading">
+              <span>行内边距</span>
+              <strong>{logRowPadding}px</strong>
+            </span>
+            <input
+              max={LOG_ROW_PADDING_RANGE.max}
+              min={LOG_ROW_PADDING_RANGE.min}
+              onChange={(event) =>
+                setLogRowPadding(
+                  clampNumber(Number(event.target.value), LOG_ROW_PADDING_RANGE.min, LOG_ROW_PADDING_RANGE.max),
+                )
+              }
+              step={1}
+              type="range"
+              value={logRowPadding}
+            />
+            <span className="preference-scale">
+              <span>紧凑</span>
+              <span>舒展</span>
+            </span>
+          </label>
         </section>
 
         <section className="sidebar-section">

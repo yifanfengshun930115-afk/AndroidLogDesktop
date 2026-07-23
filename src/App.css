@@ -127,6 +127,46 @@
   padding: 0 10px;
 }
 
+.preference-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  padding: 10px;
+}
+
+.preference-heading,
+.preference-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.preference-heading span {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.preference-heading strong {
+  color: var(--color-primary-strong);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.preference-control input[type="range"] {
+  width: 100%;
+  accent-color: var(--color-primary);
+}
+
+.preference-scale {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
@@ -551,6 +591,7 @@
 }
 
 .log-panel {
+  --log-cell-x-padding: calc(var(--log-row-padding) + 5px);
   display: flex;
   min-height: 0;
   flex: 1;
@@ -577,17 +618,18 @@
 }
 
 .log-header span {
-  padding: 9px 12px;
+  padding: calc(var(--log-row-padding) + 2px) var(--log-cell-x-padding);
 }
 
 .log-list {
   flex: 1;
   overflow: auto;
-  font-size: 12px;
+  font-size: var(--log-font-size);
+  line-height: 1.45;
 }
 
 .log-row {
-  min-height: 32px;
+  min-height: calc(var(--log-font-size) + var(--log-row-padding) + var(--log-row-padding));
   align-items: start;
   border-bottom: 1px solid var(--color-surface-muted);
   border-left: 3px solid transparent;
@@ -599,7 +641,7 @@
 
 .log-row > span {
   min-width: 0;
-  padding: 7px 12px;
+  padding: var(--log-row-padding) var(--log-cell-x-padding);
 }
 
 .mono {
@@ -616,9 +658,9 @@
   min-width: 58px;
   justify-content: center;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: calc(var(--log-font-size) - 1px);
   font-weight: 800;
-  line-height: 18px;
+  line-height: calc(var(--log-font-size) + 6px);
   padding: 0 8px;
 }
 
