@@ -215,7 +215,7 @@ const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWid
   level: { nowrap: '88px', wrap: '88px', minWidth: 88 },
   process: { nowrap: '96px', wrap: '96px', minWidth: 96 },
   tag: { nowrap: '180px', wrap: '180px', minWidth: 180 },
-  message: { nowrap: 'minmax(520px, 1fr)', wrap: 'minmax(260px, 1fr)', minWidth: 520 },
+  message: { nowrap: 'minmax(520px, max-content)', wrap: 'minmax(260px, 1fr)', minWidth: 520 },
 }
 
 function createLogTab(index: number, selectedSerial = ''): LogTab {
@@ -768,6 +768,7 @@ function App() {
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
   const tabsRef = useRef(tabs)
   const draggedTabIdRef = useRef('')
+  const autoStartPendingRef = useRef(!isDetachedWindow)
   const toastTimerRef = useRef<number>()
   const tabTitleInputRef = useRef<HTMLInputElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
@@ -939,6 +940,12 @@ function App() {
     }
     window.requestAnimationFrame(() => findInputRef.current?.focus())
   }, [activeTabId, findBarOpen])
+
+  useEffect(() => {
+    if (logListRef.current) {
+      logListRef.current.scrollLeft = 0
+    }
+  }, [activeTab.softWrap, activeTab.visibleLogFields, activeTabId])
 
   useEffect(() => {
     if (!activeTab?.title) {
@@ -1636,6 +1643,34 @@ function App() {
     activeTab.processes.length,
     activeTab.selectedSerial,
     refreshProcesses,
+  ])
+
+  useEffect(() => {
+    if (
+      !autoStartPendingRef.current ||
+      isDetachedWindow ||
+      loadingDevices ||
+      !adbInfo?.available ||
+      onlineDevices.length === 0 ||
+      startingTabId === activeTab.id ||
+      activeTab.session?.running ||
+      !activeTab.selectedSerial
+    ) {
+      return
+    }
+
+    autoStartPendingRef.current = false
+    void startTabLogcat(activeTab.id, false)
+  }, [
+    activeTab.id,
+    activeTab.selectedSerial,
+    activeTab.session?.running,
+    adbInfo?.available,
+    isDetachedWindow,
+    loadingDevices,
+    onlineDevices.length,
+    startTabLogcat,
+    startingTabId,
   ])
 
   useEffect(() => {
@@ -2422,73 +2457,77 @@ function App() {
           className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}
           style={logLayoutStyle}
         >
-          <div className="log-header">
-            {activeTab.visibleLogFields.map((field) => (
-              <span key={field}>{LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label}</span>
-            ))}
-          </div>
-          {visibleLogs.length > 0 ? (
-            <div className="log-list" ref={logListRef}>
-              {visibleLogs.map((entry) => (
-                <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id}>
-                  {activeTab.visibleLogFields.map((field) => {
-                    if (field === 'time') {
-                      return (
-                        <HighlightedText
-                          className="mono muted"
-                          key={field}
-                          matcher={activeFindMatcher}
-                          text={entry.timestamp || '-'}
-                        />
-                      )
-                    }
-                    if (field === 'level') {
-                      return (
-                        <span key={field}>
-                          <span className={`level-badge ${levelClass(entry.level)}`}>
-                            {LOG_LEVEL_LABELS[entry.level]}
-                          </span>
-                        </span>
-                      )
-                    }
-                    if (field === 'process') {
-                      return (
-                        <HighlightedText
-                          className="mono muted"
-                          key={field}
-                          matcher={activeFindMatcher}
-                          text={entry.pid || '-'}
-                        />
-                      )
-                    }
-                    if (field === 'tag') {
-                      return (
-                        <HighlightedText
-                          className="log-tag"
-                          key={field}
-                          matcher={activeFindMatcher}
-                          text={entry.tag || '-'}
-                        />
-                      )
-                    }
-                    return (
-                      <HighlightedText
-                        className="log-message"
-                        key={field}
-                        matcher={activeFindMatcher}
-                        text={entry.message}
-                      />
-                    )
-                  })}
+          <div className="log-scroll-frame" ref={logListRef}>
+            <div className="log-table">
+              <div className="log-header">
+                {activeTab.visibleLogFields.map((field) => (
+                  <span key={field}>{LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label}</span>
+                ))}
+              </div>
+              {visibleLogs.length > 0 ? (
+                <div className="log-list">
+                  {visibleLogs.map((entry) => (
+                    <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id}>
+                      {activeTab.visibleLogFields.map((field) => {
+                        if (field === 'time') {
+                          return (
+                            <HighlightedText
+                              className="mono muted"
+                              key={field}
+                              matcher={activeFindMatcher}
+                              text={entry.timestamp || '-'}
+                            />
+                          )
+                        }
+                        if (field === 'level') {
+                          return (
+                            <span key={field}>
+                              <span className={`level-badge ${levelClass(entry.level)}`}>
+                                {LOG_LEVEL_LABELS[entry.level]}
+                              </span>
+                            </span>
+                          )
+                        }
+                        if (field === 'process') {
+                          return (
+                            <HighlightedText
+                              className="mono muted"
+                              key={field}
+                              matcher={activeFindMatcher}
+                              text={entry.pid || '-'}
+                            />
+                          )
+                        }
+                        if (field === 'tag') {
+                          return (
+                            <HighlightedText
+                              className="log-tag"
+                              key={field}
+                              matcher={activeFindMatcher}
+                              text={entry.tag || '-'}
+                            />
+                          )
+                        }
+                        return (
+                          <HighlightedText
+                            className="log-message"
+                            key={field}
+                            matcher={activeFindMatcher}
+                            text={entry.message}
+                          />
+                        )
+                      })}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              ) : (
+                <div className="empty-state">
+                  <strong>{isRunning ? (activeTab.paused ? '已暂停' : '正在监听') : '等待日志输入'}</strong>
+                  <span>{isRunning ? '当前过滤条件下暂无日志。' : '连接设备后即可开始监听 logcat。'}</span>
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="empty-state">
-              <strong>{isRunning ? (activeTab.paused ? '已暂停' : '正在监听') : '等待日志输入'}</strong>
-              <span>{isRunning ? '当前过滤条件下暂无日志。' : '连接设备后即可开始监听 logcat。'}</span>
-            </div>
-          )}
+          </div>
         </div>
       </section>
       {toast ? (
