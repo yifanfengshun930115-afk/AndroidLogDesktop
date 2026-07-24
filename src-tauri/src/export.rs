@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -52,6 +53,67 @@ pub fn export_logs(content: String) -> Result<ExportResult, String> {
     }
 
     export_logs_to_dir(&content, downloads_dir(), export_file_name())
+}
+
+fn command_status_error(program: &str, status: ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("{program} 退出码 {code}"),
+        None => format!("{program} 被系统中断"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_path(path: &Path) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("打开 Finder 失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(command_status_error("open -R", status))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_path(path: &Path) -> Result<(), String> {
+    let status = Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .status()
+        .map_err(|error| format!("打开文件管理器失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(command_status_error("explorer.exe", status))
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn reveal_path(path: &Path) -> Result<(), String> {
+    let target = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(path);
+    let status = Command::new("xdg-open")
+        .arg(target)
+        .status()
+        .map_err(|error| format!("打开文件管理器失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(command_status_error("xdg-open", status))
+    }
+}
+
+#[tauri::command]
+pub fn reveal_export_file(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(file_path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("导出文件路径为空".to_string());
+    }
+    if !path.exists() {
+        return Err("导出文件不存在".to_string());
+    }
+
+    reveal_path(&path)
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ pub fn run() {
             adb::list_adb_devices,
             adb::list_adb_processes,
             export::export_logs,
+            export::reveal_export_file,
             transfer::clear_tab_transfer,
             transfer::put_tab_transfer,
             transfer::take_tab_transfer,

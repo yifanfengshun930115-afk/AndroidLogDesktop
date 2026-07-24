@@ -33,6 +33,7 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   type CSSProperties,
   type DragEvent as ReactDragEvent,
+  type FormEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -41,7 +42,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { listAdbDevices, listAdbProcesses } from './api/adb'
-import { exportLogs } from './api/exportLogs'
+import { exportLogs, revealExportFile } from './api/exportLogs'
 import {
   listenLogcatBatch,
   listenLogcatError,
@@ -81,9 +82,12 @@ interface LogTab {
   selectedPackages: string[]
   visibleLogFields: LogField[]
   searchOptions: LogSearchOptions
+  findText: string
+  findOptions: LogSearchOptions
   processes: AdbProcessInfo[]
   processError: string
   loadingProcesses: boolean
+  restoreSessionRunning?: boolean
 }
 
 type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
@@ -102,6 +106,9 @@ interface TabTransferPayload {
   selectedPackages: string[]
   visibleLogFields: LogField[]
   searchOptions: LogSearchOptions
+  findText?: string
+  findOptions?: LogSearchOptions
+  sessionRunning?: boolean
   processes: AdbProcessInfo[]
   processError: string
   logEntries: SerializedLogEntry[]
@@ -115,6 +122,13 @@ interface InitialAppState {
   tabs: LogTab[]
   activeTabId: string
   nextTabIndex: number
+}
+
+interface ToastMessage {
+  id: number
+  tone: 'success' | 'danger'
+  title: string
+  message?: string
 }
 
 const LOG_COLOR_SCHEME_LABELS: Record<LogColorScheme, string> = {
@@ -179,6 +193,8 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     selectedPackages: [],
     visibleLogFields: [...DEFAULT_LOG_FIELDS],
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS },
+    findText: '',
+    findOptions: { ...DEFAULT_SEARCH_OPTIONS },
     processes: [],
     processError: '',
     loadingProcesses: false,
@@ -225,13 +241,13 @@ function normalizeLogFields(fields: LogField[]) {
   return DEFAULT_LOG_FIELDS.filter((field) => selected.has(field))
 }
 
-function serializeTabForTransfer(tab: LogTab): TabTransferPayload {
+function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTransferPayload {
   return {
     schemaVersion: TAB_TRANSFER_SCHEMA_VERSION,
     id: tab.id,
     title: tab.title,
     selectedSerial: tab.selectedSerial,
-    paused: false,
+    paused: tab.paused,
     softWrap: tab.softWrap,
     selectedLevels: [...tab.selectedLevels],
     searchText: tab.searchText,
@@ -239,6 +255,9 @@ function serializeTabForTransfer(tab: LogTab): TabTransferPayload {
     selectedPackages: [...tab.selectedPackages],
     visibleLogFields: normalizeLogFields(tab.visibleLogFields),
     searchOptions: { ...tab.searchOptions },
+    findText: tab.findText,
+    findOptions: { ...tab.findOptions },
+    sessionRunning,
     processes: [...tab.processes],
     processError: tab.processError,
     logEntries: tab.store.getTransferEntries(),
@@ -279,7 +298,7 @@ function createTabFromTransferPayload(payload: TabTransferPayload, existingIds =
     title: payload.title || 'Logcat',
     store,
     selectedSerial: payload.selectedSerial ?? '',
-    paused: false,
+    paused: Boolean(payload.paused),
     softWrap: Boolean(payload.softWrap),
     selectedLevels: payload.selectedLevels ?? [],
     searchText: payload.searchText ?? '',
@@ -287,9 +306,12 @@ function createTabFromTransferPayload(payload: TabTransferPayload, existingIds =
     selectedPackages: payload.selectedPackages ?? [],
     visibleLogFields: normalizeLogFields(payload.visibleLogFields ?? DEFAULT_LOG_FIELDS),
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.searchOptions },
+    findText: payload.findText ?? '',
+    findOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.findOptions },
     processes: payload.processes ?? [],
     processError: payload.processError ?? '',
     loadingProcesses: false,
+    restoreSessionRunning: Boolean(payload.sessionRunning),
   } satisfies LogTab
 }
 
@@ -493,8 +515,7 @@ function App() {
   const [deviceError, setDeviceError] = useState('')
   const [logError, setLogError] = useState('')
   const [isExporting, setIsExporting] = useState(false)
-  const [exportPath, setExportPath] = useState('')
-  const [exportError, setExportError] = useState('')
+  const [toast, setToast] = useState<ToastMessage>()
   const [drawerOpen, setDrawerOpen] = useState(true)
   const [packageMenuOpen, setPackageMenuOpen] = useState(false)
   const [packageSearch, setPackageSearch] = useState('')
@@ -524,11 +545,17 @@ function App() {
   const [detachingTabId, setDetachingTabId] = useState('')
   const [returningToMain, setReturningToMain] = useState(false)
   const [dragOverTabId, setDragOverTabId] = useState('')
+  const [editingTabId, setEditingTabId] = useState('')
+  const [editingTabTitle, setEditingTabTitle] = useState('')
+  const [findBarOpen, setFindBarOpen] = useState(false)
   const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
   const tabsRef = useRef(tabs)
   const draggedTabIdRef = useRef('')
+  const toastTimerRef = useRef<number>()
+  const tabTitleInputRef = useRef<HTMLInputElement>(null)
+  const findInputRef = useRef<HTMLInputElement>(null)
   const logListRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
@@ -648,9 +675,13 @@ function App() {
   const packages = packageOptions(activeTab.processes)
   const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
   const visibleTags = filterTextOptions(logSnapshot.tagOptions, tagSearch)
-  const activeSearchMatcher = useMemo(
+  const activeFilterMatcher = useMemo(
     () => compileSearchMatcher(activeTab.searchText, activeTab.searchOptions),
     [activeTab.searchOptions, activeTab.searchText],
+  )
+  const activeFindMatcher = useMemo(
+    () => compileSearchMatcher(findBarOpen ? activeTab.findText : '', activeTab.findOptions),
+    [activeTab.findOptions, activeTab.findText, findBarOpen],
   )
   const logLayoutStyle = useMemo(
     () =>
@@ -662,6 +693,44 @@ function App() {
       }) as CSSProperties,
     [activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
   )
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') {
+        return
+      }
+
+      event.preventDefault()
+      setFindBarOpen(true)
+      window.requestAnimationFrame(() => findInputRef.current?.focus())
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (!findBarOpen) {
+      return
+    }
+    window.requestAnimationFrame(() => findInputRef.current?.focus())
+  }, [activeTabId, findBarOpen])
+
+  useEffect(() => {
+    if (!activeTab?.title) {
+      return
+    }
+    const windowTitle = isDetachedWindow ? activeTab.title : `Android Log Desktop - ${activeTab.title}`
+    void getCurrentWindow().setTitle(windowTitle)
+  }, [activeTab?.title, isDetachedWindow])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -686,6 +755,8 @@ function App() {
     setTagMenuOpen(false)
     setTagSearch('')
     setContentMenuOpen(false)
+    setEditingTabId('')
+    setEditingTabTitle('')
   }, [activeTabId])
 
   useEffect(() => {
@@ -749,6 +820,43 @@ function App() {
   const updateActiveTab = useCallback(
     (updater: (tab: LogTab) => LogTab) => updateTab(activeTabId, updater),
     [activeTabId, updateTab],
+  )
+
+  const showToast = useCallback((message: ToastMessage) => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current)
+    }
+    setToast(message)
+    toastTimerRef.current = window.setTimeout(() => setToast(undefined), 3600)
+  }, [])
+
+  const beginRenameTab = useCallback((tab: LogTab) => {
+    setEditingTabId(tab.id)
+    setEditingTabTitle(tab.title)
+    window.requestAnimationFrame(() => tabTitleInputRef.current?.select())
+  }, [])
+
+  const cancelRenameTab = useCallback(() => {
+    setEditingTabId('')
+    setEditingTabTitle('')
+  }, [])
+
+  const commitRenameTab = useCallback(() => {
+    const tabId = editingTabId
+    const nextTitle = editingTabTitle.trim().slice(0, 80)
+    if (tabId && nextTitle) {
+      updateTab(tabId, (tab) => ({ ...tab, title: nextTitle }))
+    }
+    setEditingTabId('')
+    setEditingTabTitle('')
+  }, [editingTabId, editingTabTitle, updateTab])
+
+  const handleRenameSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      commitRenameTab()
+    },
+    [commitRenameTab],
   )
 
   const refreshProcesses = useCallback(
@@ -823,7 +931,11 @@ function App() {
   }, [])
 
   const startTabLogcat = useCallback(
-    async (tabId: string, clearBeforeStart: boolean) => {
+    async (
+      tabId: string,
+      clearBeforeStart: boolean,
+      options: { preservePaused?: boolean } = {},
+    ) => {
       const tab = tabsRef.current.find((item) => item.id === tabId)
       if (!tab?.selectedSerial) {
         return
@@ -843,11 +955,17 @@ function App() {
         updateTab(tabId, (current) => ({
           ...current,
           session: nextSession,
-          paused: false,
+          paused: options.preservePaused ? current.paused : false,
+          restoreSessionRunning: false,
         }))
       } catch (error) {
         setLogError(error instanceof Error ? error.message : String(error))
-        updateTab(tabId, (current) => ({ ...current, session: undefined, paused: false }))
+        updateTab(tabId, (current) => ({
+          ...current,
+          session: undefined,
+          paused: options.preservePaused ? current.paused : false,
+          restoreSessionRunning: false,
+        }))
       } finally {
         setStartingTabId('')
       }
@@ -868,19 +986,37 @@ function App() {
   }, [activeTab.id, startTabLogcat])
 
   const handleExportLogs = useCallback(async () => {
-    setExportPath('')
-    setExportError('')
     setIsExporting(true)
 
     try {
       const result = await exportLogs(activeTab.store.getExportContent())
-      setExportPath(result.filePath)
+      try {
+        await revealExportFile(result.filePath)
+        showToast({
+          id: Date.now(),
+          tone: 'success',
+          title: '已导出日志',
+          message: result.filePath,
+        })
+      } catch (error) {
+        showToast({
+          id: Date.now(),
+          tone: 'success',
+          title: '已导出日志',
+          message: `打开文件管理器失败：${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
     } catch (error) {
-      setExportError(error instanceof Error ? error.message : String(error))
+      showToast({
+        id: Date.now(),
+        tone: 'danger',
+        title: '导出失败',
+        message: error instanceof Error ? error.message : String(error),
+      })
     } finally {
       setIsExporting(false)
     }
-  }, [activeTab.store])
+  }, [activeTab.store, showToast])
 
   const togglePackage = useCallback(
     (packageName: string) => {
@@ -973,6 +1109,19 @@ function App() {
     [updateActiveTab],
   )
 
+  const toggleFindOption = useCallback(
+    (option: keyof LogSearchOptions) => {
+      updateActiveTab((tab) => ({
+        ...tab,
+        findOptions: {
+          ...tab.findOptions,
+          [option]: !tab.findOptions[option],
+        },
+      }))
+    },
+    [updateActiveTab],
+  )
+
   const addTab = useCallback(() => {
     const nextIndex = nextTabIndexRef.current
     nextTabIndexRef.current += 1
@@ -1047,16 +1196,21 @@ function App() {
       setLogError('')
 
       try {
+        const wasRunning = Boolean(tab.session?.running)
+        const wasPaused = tab.paused
         if (tab.session?.sessionId) {
           await stopLogcat(tab.session.sessionId)
         }
 
         const latestTab = tabsRef.current.find((item) => item.id === tabId) ?? tab
-        const payload = serializeTabForTransfer({
-          ...latestTab,
-          session: undefined,
-          paused: false,
-        })
+        const payload = serializeTabForTransfer(
+          {
+            ...latestTab,
+            session: undefined,
+            paused: wasPaused,
+          },
+          wasRunning,
+        )
         transferId = createTransferId('detached', tabId)
         await putTabTransfer(transferId, JSON.stringify(payload))
 
@@ -1093,15 +1247,21 @@ function App() {
     setLogError('')
 
     try {
+      const wasRunning = Boolean(activeTab.session?.running)
+      const wasPaused = activeTab.paused
       if (activeTab.session?.sessionId) {
         await stopLogcat(activeTab.session.sessionId)
       }
 
-      const payload = serializeTabForTransfer({
-        ...activeTab,
-        session: undefined,
-        paused: false,
-      })
+      const latestTab = tabsRef.current.find((item) => item.id === activeTab.id) ?? activeTab
+      const payload = serializeTabForTransfer(
+        {
+          ...latestTab,
+          session: undefined,
+          paused: wasPaused,
+        },
+        wasRunning,
+      )
       transferId = createTransferId('reattach', activeTab.id)
       await putTabTransfer(transferId, JSON.stringify(payload))
       await emitTo<TabTransferEventPayload>('main', REATTACH_TAB_EVENT, { transferId })
@@ -1116,7 +1276,7 @@ function App() {
   }, [activeTab, isDetachedWindow, returningToMain])
 
   const handleTabDragStart = useCallback(
-    (event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+    (event: ReactDragEvent<HTMLDivElement>, tabId: string) => {
       if (isDetachedWindow || detachingTabId) {
         event.preventDefault()
         return
@@ -1129,7 +1289,7 @@ function App() {
     [detachingTabId, isDetachedWindow],
   )
 
-  const handleTabDragOver = useCallback((event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+  const handleTabDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, tabId: string) => {
     const sourceTabId = draggedTabIdRef.current
     if (!sourceTabId || sourceTabId === tabId) {
       return
@@ -1141,7 +1301,7 @@ function App() {
   }, [])
 
   const handleTabDrop = useCallback(
-    (event: ReactDragEvent<HTMLButtonElement>, tabId: string) => {
+    (event: ReactDragEvent<HTMLDivElement>, tabId: string) => {
       event.preventDefault()
       const targetBounds = event.currentTarget.getBoundingClientRect()
       const placement = event.clientX > targetBounds.left + targetBounds.width / 2 ? 'after' : 'before'
@@ -1153,7 +1313,7 @@ function App() {
   )
 
   const handleTabDragEnd = useCallback(
-    (event: ReactDragEvent<HTMLButtonElement>) => {
+    (event: ReactDragEvent<HTMLDivElement>) => {
       const tabId = draggedTabIdRef.current
       draggedTabIdRef.current = ''
       setDragOverTabId('')
@@ -1190,6 +1350,21 @@ function App() {
     activeTab.selectedSerial,
     refreshProcesses,
   ])
+
+  useEffect(() => {
+    const pendingTab = tabs.find(
+      (tab) => tab.restoreSessionRunning && !tab.session?.running && startingTabId !== tab.id,
+    )
+    if (!pendingTab) {
+      return
+    }
+    if (!pendingTab.selectedSerial) {
+      updateTab(pendingTab.id, (tab) => ({ ...tab, restoreSessionRunning: false }))
+      return
+    }
+
+    void startTabLogcat(pendingTab.id, false, { preservePaused: true })
+  }, [startingTabId, startTabLogcat, tabs, updateTab])
 
   useEffect(() => {
     activeTab.store.setQuery({
@@ -1410,13 +1585,14 @@ function App() {
       <section className="workspace">
         <div className="tab-strip">
           {tabs.map((tab) => (
-            <button
+            <div
               className={`tab-button ${tab.id === activeTab.id ? 'active' : ''} ${
                 dragOverTabId === tab.id ? 'drag-over' : ''
               } ${detachingTabId === tab.id ? 'pending' : ''}`}
-              draggable={!isDetachedWindow && !detachingTabId}
+              draggable={!isDetachedWindow && !detachingTabId && editingTabId !== tab.id}
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
+              onDoubleClick={() => beginRenameTab(tab)}
               onDragEnd={handleTabDragEnd}
               onDragLeave={() => {
                 if (dragOverTabId === tab.id) {
@@ -1426,8 +1602,39 @@ function App() {
               onDragOver={(event) => handleTabDragOver(event, tab.id)}
               onDragStart={(event) => handleTabDragStart(event, tab.id)}
               onDrop={(event) => handleTabDrop(event, tab.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  setActiveTabId(tab.id)
+                }
+              }}
+              role="button"
+              tabIndex={0}
             >
-              <span>{tab.title}</span>
+              {editingTabId === tab.id ? (
+                <form
+                  className="tab-title-form"
+                  onBlur={commitRenameTab}
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onSubmit={handleRenameSubmit}
+                >
+                  <input
+                    ref={tabTitleInputRef}
+                    onChange={(event) => setEditingTabTitle(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault()
+                        cancelRenameTab()
+                      }
+                    }}
+                    value={editingTabTitle}
+                  />
+                </form>
+              ) : (
+                <span className="tab-title">{tab.title}</span>
+              )}
               {detachingTabId === tab.id ? (
                 <small>分离中</small>
               ) : tab.session?.running ? (
@@ -1435,25 +1642,29 @@ function App() {
               ) : null}
               {!isDetachedWindow ? (
                 <>
-                  <ExternalLink
-                    className="tab-action-icon"
-                    size={14}
+                  <button
+                    aria-label="分离日志页"
+                    className="tab-action-button"
                     onClick={(event) => {
                       event.stopPropagation()
                       void detachTab(tab.id)
                     }}
-                  />
-                  <X
-                    className="tab-action-icon"
-                    size={14}
+                  >
+                    <ExternalLink size={14} />
+                  </button>
+                  <button
+                    aria-label="关闭日志页"
+                    className="tab-action-button"
                     onClick={(event) => {
                       event.stopPropagation()
                       closeTab(tab.id)
                     }}
-                  />
+                  >
+                    <X size={14} />
+                  </button>
                 </>
               ) : null}
-            </button>
+            </div>
           ))}
           {!isDetachedWindow ? (
             <button className="tab-add" onClick={addTab}>
@@ -1468,7 +1679,7 @@ function App() {
               <Menu size={18} />
             </button>
             <div>
-              <h1>Logcat</h1>
+              <h1>{activeTab.title}</h1>
               <p>{selectedDevice ? deviceTitle(selectedDevice) : '等待设备连接'}</p>
             </div>
           </div>
@@ -1536,26 +1747,6 @@ function App() {
             <div>
               <strong>Logcat</strong>
               <span>{logError}</span>
-            </div>
-          </section>
-        ) : null}
-
-        {exportError ? (
-          <section className="notice danger">
-            <AlertTriangle size={18} />
-            <div>
-              <strong>导出失败</strong>
-              <span>{exportError}</span>
-            </div>
-          </section>
-        ) : null}
-
-        {exportPath ? (
-          <section className="notice success">
-            <CheckCircle2 size={18} />
-            <div>
-              <strong>已导出</strong>
-              <span>{exportPath}</span>
             </div>
           </section>
         ) : null}
@@ -1811,15 +2002,15 @@ function App() {
             ) : null}
           </div>
           <div
-            className={`search-field log-search-field ${activeSearchMatcher.error ? 'invalid' : ''}`}
-            title={activeSearchMatcher.error ? `Regex 无效：${activeSearchMatcher.error}` : undefined}
+            className={`search-field log-search-field ${activeFilterMatcher.error ? 'invalid' : ''}`}
+            title={activeFilterMatcher.error ? `Regex 无效：${activeFilterMatcher.error}` : undefined}
           >
             <Search size={16} />
             <input
               onChange={(event) =>
                 updateActiveTab((tab) => ({ ...tab, searchText: event.target.value }))
               }
-              placeholder="搜索日志内容"
+              placeholder="过滤日志内容"
               value={activeTab.searchText}
             />
             <div className="search-option-group" aria-label="搜索选项">
@@ -1845,16 +2036,74 @@ function App() {
                 aria-label="Regex"
                 aria-pressed={activeTab.searchOptions.regex}
                 className={`search-option-button ${activeTab.searchOptions.regex ? 'active-toggle' : ''} ${
-                  activeSearchMatcher.error ? 'invalid' : ''
+                  activeFilterMatcher.error ? 'invalid' : ''
                 }`}
                 onClick={() => toggleSearchOption('regex')}
-                title={activeSearchMatcher.error ? `Regex 无效：${activeSearchMatcher.error}` : 'Regex'}
+                title={activeFilterMatcher.error ? `Regex 无效：${activeFilterMatcher.error}` : 'Regex'}
               >
                 <Regex size={15} />
               </button>
             </div>
           </div>
         </div>
+
+        {findBarOpen ? (
+          <div className={`find-row ${activeFindMatcher.error ? 'invalid' : ''}`}>
+            <label className="search-field log-search-field find-search-field">
+              <Search size={16} />
+              <input
+                ref={findInputRef}
+                onChange={(event) =>
+                  updateActiveTab((tab) => ({ ...tab, findText: event.target.value }))
+                }
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    setFindBarOpen(false)
+                  }
+                }}
+                placeholder="查找并高亮日志内容"
+                value={activeTab.findText}
+              />
+              <div className="search-option-group" aria-label="查找选项">
+                <button
+                  aria-label="Match Case"
+                  aria-pressed={activeTab.findOptions.matchCase}
+                  className={`search-option-button ${activeTab.findOptions.matchCase ? 'active-toggle' : ''}`}
+                  onClick={() => toggleFindOption('matchCase')}
+                  title="Match Case"
+                >
+                  <CaseSensitive size={15} />
+                </button>
+                <button
+                  aria-label="Words"
+                  aria-pressed={activeTab.findOptions.wholeWords}
+                  className={`search-option-button ${activeTab.findOptions.wholeWords ? 'active-toggle' : ''}`}
+                  onClick={() => toggleFindOption('wholeWords')}
+                  title="Words"
+                >
+                  <WholeWord size={15} />
+                </button>
+                <button
+                  aria-label="Regex"
+                  aria-pressed={activeTab.findOptions.regex}
+                  className={`search-option-button ${activeTab.findOptions.regex ? 'active-toggle' : ''} ${
+                    activeFindMatcher.error ? 'invalid' : ''
+                  }`}
+                  onClick={() => toggleFindOption('regex')}
+                  title={activeFindMatcher.error ? `Regex 无效：${activeFindMatcher.error}` : 'Regex'}
+                >
+                  <Regex size={15} />
+                </button>
+              </div>
+            </label>
+            <button className="icon-button" onClick={() => setFindBarOpen(false)}>
+              <X size={16} />
+            </button>
+            {activeFindMatcher.error ? (
+              <span className="find-error">Regex 无效：{activeFindMatcher.error}</span>
+            ) : null}
+          </div>
+        ) : null}
 
         <div
           className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}
@@ -1868,14 +2117,14 @@ function App() {
           {visibleLogs.length > 0 ? (
             <div className="log-list" ref={logListRef}>
               {visibleLogs.map((entry) => (
-                <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id} title={entry.raw}>
+                <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id}>
                   {activeTab.visibleLogFields.map((field) => {
                     if (field === 'time') {
                       return (
                         <HighlightedText
                           className="mono muted"
                           key={field}
-                          matcher={activeSearchMatcher}
+                          matcher={activeFindMatcher}
                           text={entry.timestamp || '-'}
                         />
                       )
@@ -1894,7 +2143,7 @@ function App() {
                         <HighlightedText
                           className="mono muted"
                           key={field}
-                          matcher={activeSearchMatcher}
+                          matcher={activeFindMatcher}
                           text={entry.pid || '-'}
                         />
                       )
@@ -1904,7 +2153,7 @@ function App() {
                         <HighlightedText
                           className="log-tag"
                           key={field}
-                          matcher={activeSearchMatcher}
+                          matcher={activeFindMatcher}
                           text={entry.tag || '-'}
                         />
                       )
@@ -1913,7 +2162,7 @@ function App() {
                       <HighlightedText
                         className="log-message"
                         key={field}
-                        matcher={activeSearchMatcher}
+                        matcher={activeFindMatcher}
                         text={entry.message}
                       />
                     )
@@ -1929,6 +2178,15 @@ function App() {
           )}
         </div>
       </section>
+      {toast ? (
+        <div className={`toast ${toast.tone}`} key={toast.id} role="status">
+          {toast.tone === 'danger' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          <div>
+            <strong>{toast.title}</strong>
+            {toast.message ? <span>{toast.message}</span> : null}
+          </div>
+        </div>
+      ) : null}
     </main>
   )
 }
