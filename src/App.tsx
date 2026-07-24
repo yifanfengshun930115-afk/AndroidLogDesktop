@@ -285,7 +285,6 @@ const LOG_FONT_SIZE_RANGE = { min: 10, max: 18 }
 const LOG_ROW_PADDING_RANGE = { min: 3, max: 12 }
 const LOG_SCROLL_EDGE_THRESHOLD = 18
 const LOG_BOTTOM_OVERSCAN_ROWS = 500
-const LOG_MAX_BOTTOM_OVERSCAN_ROWS = 3000
 const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
 const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
@@ -1247,7 +1246,6 @@ function App() {
   const [closingApp, setClosingApp] = useState(false)
   const [resizingLogField, setResizingLogField] = useState<LogField | ''>('')
   const [logWindowStarts, setLogWindowStarts] = useState<Record<string, number>>({})
-  const [bottomOverscanRows, setBottomOverscanRows] = useState(LOG_BOTTOM_OVERSCAN_ROWS)
   const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
@@ -1395,7 +1393,7 @@ function App() {
   const activeLogWindowStart = logWindowStarts[activeTabId] ?? 0
   const activeStickToBottom = logStickToBottomByTabRef.current[activeTabId] ?? true
   const activeLogWindowLimit = activeStickToBottom
-    ? Math.min(logSnapshot.capacity, logSnapshot.displayLimit + bottomOverscanRows)
+    ? Math.min(logSnapshot.capacity, logSnapshot.displayLimit + LOG_BOTTOM_OVERSCAN_ROWS)
     : logSnapshot.displayLimit
   const visibleLogs = activeStore.getVisibleEntriesWindow(activeLogWindowStart, activeLogWindowLimit)
   const packages = packageOptions(activeProcesses)
@@ -1600,54 +1598,6 @@ function App() {
   ])
 
   useLayoutEffect(() => {
-    const scrollFrame = logListRef.current
-    const stickToBottom = logStickToBottomByTabRef.current[activeTabId] ?? true
-    if (!scrollFrame || !stickToBottom || visibleLogs.length === 0) {
-      return
-    }
-
-    const logList = scrollFrame.querySelector<HTMLElement>('.log-list')
-    const logHeader = scrollFrame.querySelector<HTMLElement>('.log-header')
-    if (!logList) {
-      return
-    }
-
-    const availableHeight = Math.max(0, scrollFrame.clientHeight - (logHeader?.offsetHeight ?? 0))
-    const listHeight = logList.offsetHeight
-    const canGrow = activeLogWindowLimit < logSnapshot.capacity
-    if (!canGrow || availableHeight <= 0 || listHeight >= availableHeight - 2) {
-      return
-    }
-
-    const averageRowHeight = Math.max(1, listHeight / visibleLogs.length)
-    const missingRows = Math.ceil((availableHeight - listHeight) / averageRowHeight) + 20
-    if (missingRows <= 0) {
-      return
-    }
-
-    pendingLogScrollRef.current = 'bottom'
-    setBottomOverscanRows((current) =>
-      Math.min(LOG_MAX_BOTTOM_OVERSCAN_ROWS, current + missingRows),
-    )
-  }, [
-    activeLogWindowLimit,
-    activeTabId,
-    logSnapshot.capacity,
-    logSnapshot.version,
-    visibleLogs.length,
-  ])
-
-  useEffect(() => {
-    setBottomOverscanRows(LOG_BOTTOM_OVERSCAN_ROWS)
-  }, [
-    activeTab.softWrap,
-    activeTab.visibleLogFields,
-    activeTabId,
-    logFontSize,
-    logRowPadding,
-  ])
-
-  useLayoutEffect(() => {
     if (logListRef.current) {
       logListRef.current.scrollLeft = 0
     }
@@ -1658,7 +1608,11 @@ function App() {
       return
     }
     const windowTitle = isDetachedWindow ? activeTab.title : `Android Log Desktop - ${activeTab.title}`
-    void getCurrentWindow().setTitle(windowTitle)
+    try {
+      void getCurrentWindow().setTitle(windowTitle)
+    } catch {
+      // The renderer can be opened outside Tauri during local diagnostics.
+    }
   }, [activeTab?.title, isDetachedWindow])
 
   useEffect(() => {
