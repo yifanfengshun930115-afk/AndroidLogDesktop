@@ -61,11 +61,15 @@ export interface LogEntry {
   deviceSerial?: string
   timestamp: string
   timestampEpochMs?: number
+  timestampSeconds?: number
+  timestampNanos?: number
   pid: string
   tid: string
   level: LogLevel
   tag: string
   message: string
+  applicationId?: string
+  processName?: string
   raw: string
   searchText: string
   isCrash: boolean
@@ -74,6 +78,55 @@ export interface LogEntry {
 export interface ExportResult {
   filePath: string
   sizeBytes: number
+}
+
+export type AndroidStudioLogLevel = 'VERBOSE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'ASSERT'
+
+export interface AndroidStudioLogcatTimestamp {
+  seconds: number
+  nanos: number
+}
+
+export interface AndroidStudioLogcatHeader {
+  logLevel: AndroidStudioLogLevel
+  pid: number
+  tid: number
+  applicationId: string
+  processName: string
+  tag: string
+  timestamp: AndroidStudioLogcatTimestamp
+}
+
+export interface AndroidStudioLogcatMessage {
+  header: AndroidStudioLogcatHeader
+  message: string
+}
+
+export interface AndroidStudioPhysicalDevice {
+  serialNumber: string
+  isOnline: boolean
+  release: string
+  apiLevel: {
+    majorVersion: number
+    minorVersion: number
+  }
+  featureLevel: number
+  manufacturer: string
+  model: string
+  type: string
+}
+
+export interface AndroidStudioLogcatMetadata {
+  device?: {
+    physicalDevice?: AndroidStudioPhysicalDevice
+  }
+  filter: string
+  projectApplicationIds: string[]
+}
+
+export interface AndroidStudioLogcatFile {
+  metadata: AndroidStudioLogcatMetadata
+  logcatMessages: AndroidStudioLogcatMessage[]
 }
 
 export interface UpdateCheckResult {

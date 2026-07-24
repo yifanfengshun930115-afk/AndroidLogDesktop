@@ -1,4 +1,8 @@
-import { parseLogcatLine } from './logcat'
+import {
+  createStructuredLogEntry,
+  parseLogcatLine,
+  type StructuredLogEntryInput,
+} from './logcat'
 import {
   compileSearchMatcher,
   matchesSearchText,
@@ -42,10 +46,27 @@ export interface AppendRawBatchOptions {
   deviceSerial?: string
 }
 
+export interface AppendStructuredBatchOptions {
+  sessionId: string
+  entries: Array<Omit<StructuredLogEntryInput, 'sessionId' | 'sequence'>>
+  deviceSerial?: string
+}
+
 export interface SerializedLogEntry {
   raw: string
   sessionId: string
   deviceSerial?: string
+  timestamp?: string
+  timestampEpochMs?: number
+  timestampSeconds?: number
+  timestampNanos?: number
+  pid?: string
+  tid?: string
+  level?: LogLevel
+  tag?: string
+  message?: string
+  applicationId?: string
+  processName?: string
 }
 
 export interface LogStoreSnapshot {
@@ -349,6 +370,30 @@ export class LogStore {
     this.commitChange()
   }
 
+  appendStructuredBatch({ sessionId, entries, deviceSerial }: AppendStructuredBatchOptions) {
+    if (entries.length === 0) {
+      return
+    }
+
+    let evicted = false
+    for (const entry of entries) {
+      evicted = this.appendEntry(
+        createStructuredLogEntry({
+          ...entry,
+          sessionId,
+          sequence: this.nextSequence++,
+          deviceSerial: entry.deviceSerial ?? deviceSerial,
+        }),
+      ) || evicted
+    }
+
+    if (evicted) {
+      this.pruneIndexes()
+      this.trimStaleFilteredSequences()
+    }
+    this.commitChange()
+  }
+
   hydrateTransferEntries(entries: SerializedLogEntry[]) {
     if (entries.length === 0) {
       return
@@ -356,6 +401,16 @@ export class LogStore {
 
     let evicted = false
     for (const entry of entries) {
+      if (typeof entry.message === 'string' || typeof entry.level === 'string') {
+        evicted = this.appendEntry(
+          createStructuredLogEntry({
+            ...entry,
+            sequence: this.nextSequence++,
+          }),
+        ) || evicted
+        continue
+      }
+
       evicted = this.appendEntry(
         parseLogcatLine(entry.raw, entry.sessionId, this.nextSequence++, entry.deviceSerial),
       ) || evicted
@@ -435,6 +490,17 @@ export class LogStore {
         raw: entry.raw,
         sessionId: entry.sessionId,
         deviceSerial: entry.deviceSerial,
+        timestamp: entry.timestamp,
+        timestampEpochMs: entry.timestampEpochMs,
+        timestampSeconds: entry.timestampSeconds,
+        timestampNanos: entry.timestampNanos,
+        pid: entry.pid,
+        tid: entry.tid,
+        level: entry.level,
+        tag: entry.tag,
+        message: entry.message,
+        applicationId: entry.applicationId,
+        processName: entry.processName,
       }))
   }
 

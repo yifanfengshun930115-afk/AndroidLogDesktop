@@ -24,6 +24,7 @@ import {
   Tags,
   Trash2,
   Undo2,
+  Upload,
   Usb,
   WholeWord,
   WrapText,
@@ -34,6 +35,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   type CSSProperties,
+  type ChangeEvent,
   type DragEvent as ReactDragEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
@@ -49,6 +51,11 @@ import {
 import { closeApp } from './api/appLifecycle'
 import { listAdbDevices, listAdbProcesses } from './api/adb'
 import { exportLogs, revealExportFile } from './api/exportLogs'
+import {
+  buildAndroidStudioLogcatFile,
+  parseAndroidStudioLogcatText,
+  stringifyAndroidStudioLogcatFile,
+} from './androidStudioLogcat'
 import {
   listenLogcatBatch,
   listenLogcatError,
@@ -913,12 +920,13 @@ function pruneSelectedPackages(selectedPackages: string[], processes: DeviceProc
 function reconcileTabDevices(tab: LogTab, onlineSerials: string[]) {
   const onlineSet = new Set(onlineSerials)
   const retainedSerials = tab.selectedSerials.filter((serial) => onlineSet.has(serial))
-  const selectedSerials =
-    !tab.deviceSelectionManuallyConfigured && onlineSerials.length > 0
+  const selectedSerials = tab.deviceSelectionManuallyConfigured
+    ? tab.selectedSerials.length > 0
+      ? tab.selectedSerials
+      : onlineSerials
+    : onlineSerials.length > 0
       ? onlineSerials
-      : retainedSerials.length > 0
-        ? retainedSerials
-        : onlineSerials
+      : retainedSerials
   const selectedSet = new Set(selectedSerials)
   const processesBySerial = Object.fromEntries(
     Object.entries(tab.processesBySerial).filter(([serial]) => selectedSet.has(serial)),
@@ -1199,6 +1207,7 @@ function App() {
   const [deviceError, setDeviceError] = useState('')
   const [logError, setLogError] = useState('')
   const [isExporting, setIsExporting] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
   const [toast, setToast] = useState<ToastMessage>()
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckState>({
     status: 'idle',
@@ -1240,6 +1249,7 @@ function App() {
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
   const tabsRef = useRef(tabs)
+  const importFileInputRef = useRef<HTMLInputElement>(null)
   const draggedTabIdRef = useRef('')
   const autoStartPendingRef = useRef(!isDetachedWindow)
   const updateAutoCheckStartedRef = useRef(false)
@@ -2307,7 +2317,23 @@ function App() {
     setIsExporting(true)
 
     try {
-      const result = await exportLogs(activeTab.store.getExportContent())
+      const entries = activeTab.store.getFilteredEntries()
+      if (entries.length === 0) {
+        throw new Error('没有可导出的日志')
+      }
+
+      const content = stringifyAndroidStudioLogcatFile(
+        buildAndroidStudioLogcatFile(entries, {
+          devices,
+          selectedSerials: activeTab.selectedSerials,
+          processes: activeProcesses,
+          selectedPackages: activeTab.selectedPackages,
+          selectedTags: activeTab.selectedTags,
+          selectedLevels: activeTab.selectedLevels,
+          searchText: activeTab.searchText,
+        }),
+      )
+      const result = await exportLogs(content)
       try {
         await revealExportFile(result.filePath)
         showToast({
@@ -2334,7 +2360,85 @@ function App() {
     } finally {
       setIsExporting(false)
     }
-  }, [activeTab.store, showToast])
+  }, [
+    activeProcesses,
+    activeTab.searchText,
+    activeTab.selectedLevels,
+    activeTab.selectedPackages,
+    activeTab.selectedSerials,
+    activeTab.selectedTags,
+    activeTab.store,
+    devices,
+    showToast,
+  ])
+
+  const handleImportButtonClick = useCallback(() => {
+    importFileInputRef.current?.click()
+  }, [])
+
+  const handleImportFileSelected = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0]
+      event.currentTarget.value = ''
+      if (!file) {
+        return
+      }
+
+      setIsImporting(true)
+      try {
+        const text = await file.text()
+        const imported = parseAndroidStudioLogcatText(text, file.name)
+        const store = new LogStore()
+        const sessionId = `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        store.appendStructuredBatch({
+          sessionId,
+          entries: imported.entries,
+        })
+
+        const nextIndex = nextTabIndexRef.current
+        nextTabIndexRef.current += 1
+        const existingIds = new Set(tabsRef.current.map((tab) => tab.id))
+        const baseTab = createLogTab(nextIndex, imported.deviceSerials)
+        const importedTab = {
+          ...baseTab,
+          id: uniqueTabId(baseTab.id, existingIds),
+          title: imported.title,
+          store,
+          selectedSerials: imported.deviceSerials,
+          paused: true,
+          visibleLogFields: reconcileLogFieldsForDeviceSelection(
+            DEFAULT_LOG_FIELDS,
+            imported.deviceSerials,
+            false,
+          ),
+          deviceSelectionManuallyConfigured: true,
+          deviceFieldManuallyConfigured: false,
+        } satisfies LogTab
+
+        setTabs((current) => [...current, importedTab])
+        setActiveTabId(importedTab.id)
+        setLogWindowStarts((current) => ({ ...current, [importedTab.id]: 0 }))
+        logStickToBottomByTabRef.current[importedTab.id] = false
+        logScrollTopByTabRef.current[importedTab.id] = 0
+        showToast({
+          id: Date.now(),
+          tone: 'success',
+          title: '已导入日志',
+          message: `${imported.entries.length.toLocaleString()} 条日志`,
+        })
+      } catch (error) {
+        showToast({
+          id: Date.now(),
+          tone: 'danger',
+          title: '导入失败',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      } finally {
+        setIsImporting(false)
+      }
+    },
+    [showToast],
+  )
 
   const handleExitApp = useCallback(async () => {
     setClosingApp(true)
@@ -3266,6 +3370,17 @@ function App() {
             >
               <WrapText size={16} />
               Soft-wrap
+            </button>
+            <input
+              accept=".logcat,.json,application/json"
+              hidden
+              onChange={handleImportFileSelected}
+              ref={importFileInputRef}
+              type="file"
+            />
+            <button disabled={isImporting} onClick={handleImportButtonClick}>
+              <Upload size={16} />
+              {isImporting ? '导入中' : '导入'}
             </button>
             <button disabled={logSnapshot.filteredCount === 0 || isExporting} onClick={handleExportLogs}>
               <Download size={16} />

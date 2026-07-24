@@ -269,4 +269,49 @@ describe('LogStore', () => {
       tag: 'CrashTag',
     })
   })
+
+  it('appends structured imported entries and preserves them during transfer', () => {
+    const source = new LogStore({ capacity: 10, displayLimit: 10 })
+    source.appendStructuredBatch({
+      sessionId: 'import-a',
+      entries: [
+        {
+          raw: '07-24 17:11:59.489  1619  2231 I ImportTag: imported message',
+          deviceSerial: 'RFCR301L2JN',
+          timestamp: '07-24 17:11:59.489',
+          timestampEpochMs: 1784884319489,
+          timestampSeconds: 1784884319,
+          timestampNanos: 489000000,
+          pid: '1619',
+          tid: '2231',
+          level: 'I',
+          tag: 'ImportTag',
+          message: 'imported message',
+          applicationId: 'system_server',
+          processName: 'system_server',
+        },
+      ],
+    })
+
+    source.setQuery({
+      devices: ['RFCR301L2JN'],
+      tags: ['importtag'],
+      includeText: 'imported',
+    })
+    expect(source.getSnapshot().filteredCount).toBe(1)
+
+    const target = new LogStore({ capacity: 10, displayLimit: 10 })
+    target.hydrateTransferEntries(source.getTransferEntries())
+
+    const entry = target.getSnapshot().visibleEntries[0]
+    expect(entry).toMatchObject({
+      deviceSerial: 'RFCR301L2JN',
+      level: 'I',
+      tag: 'ImportTag',
+      applicationId: 'system_server',
+      processName: 'system_server',
+      timestampSeconds: 1784884319,
+      timestampNanos: 489000000,
+    })
+  })
 })

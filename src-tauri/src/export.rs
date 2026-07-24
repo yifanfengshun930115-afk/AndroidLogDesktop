@@ -25,7 +25,7 @@ fn export_file_name() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
-    format!("android-log-desktop-{seconds}.txt")
+    format!("android-log-desktop-{seconds}.logcat")
 }
 
 fn export_logs_to_dir(
@@ -129,7 +129,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let result =
-            export_logs_to_dir("line one\nline two\n", dir.clone(), "logs.txt".to_string())
+            export_logs_to_dir("line one\nline two\n", dir.clone(), "logs.logcat".to_string())
                 .expect("export should be written");
 
         assert_eq!(result.size_bytes, 18);
