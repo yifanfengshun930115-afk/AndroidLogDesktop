@@ -5,6 +5,8 @@ import process from 'node:process'
 const args = process.argv.slice(2)
 const platform = getArgValue('--platform') ?? currentBuildPlatform()
 const target = getArgValue('--target')
+const WINDOWS_NSIS_ATTEMPTS = 3
+const WINDOWS_NSIS_RETRY_DELAY_MS = 15_000
 
 function getArgValue(name) {
   const equalPrefix = `${name}=`
@@ -49,6 +51,40 @@ function run(command, commandArgs) {
   })
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function positiveIntegerEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+async function runWithRetries(command, commandArgs, options) {
+  const attempts = options?.attempts ?? 1
+  const delayMs = options?.delayMs ?? 0
+  let lastError
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await run(command, commandArgs)
+      return
+    } catch (error) {
+      lastError = error
+      if (attempt >= attempts) {
+        break
+      }
+
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[package] Attempt ${attempt}/${attempts} failed: ${message}`)
+      console.warn(`[package] Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
+  }
+
+  throw lastError
+}
+
 function tauriBuildArgs(bundles) {
   const buildArgs = ['tauri', 'build', '--bundles', bundles]
   if (target) {
@@ -70,7 +106,10 @@ async function packageWindows() {
       'Windows NSIS packages must be built on Windows or a CI runner with the Windows Tauri toolchain.',
     )
   }
-  await run('npx', tauriBuildArgs('nsis'))
+  await runWithRetries('npx', tauriBuildArgs('nsis'), {
+    attempts: positiveIntegerEnv('TAURI_WINDOWS_NSIS_ATTEMPTS', WINDOWS_NSIS_ATTEMPTS),
+    delayMs: positiveIntegerEnv('TAURI_WINDOWS_NSIS_RETRY_DELAY_MS', WINDOWS_NSIS_RETRY_DELAY_MS),
+  })
 }
 
 async function packageLinux() {
