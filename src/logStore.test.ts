@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LogStore } from './logStore'
+import { createPidDeviceKey, LogStore } from './logStore'
 
 const lines = [
   '07-23 16:24:57.485  1619  2231 D DemoTag: debug message',
@@ -112,6 +112,36 @@ describe('LogStore', () => {
       deviceSerial: 'device-b',
       tag: 'CrashTag',
       isCrash: true,
+    })
+  })
+
+  it('filters by exact device and pid pairs', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+    const sharedPidLines = [
+      '07-23 16:24:57.485  1619  2231 D DemoTag: device a message',
+      '07-23 16:24:57.486  1619  2231 D DemoTag: device b message',
+    ]
+
+    store.appendRawBatch({
+      sessionId: 'session-a',
+      deviceSerial: 'device-a',
+      lines: [sharedPidLines[0]],
+    })
+    store.appendRawBatch({
+      sessionId: 'session-b',
+      deviceSerial: 'device-b',
+      lines: [sharedPidLines[1]],
+    })
+
+    store.setQuery({
+      pidDeviceKeys: [createPidDeviceKey('DEVICE-B', '1619')],
+    })
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.filteredCount).toBe(1)
+    expect(snapshot.visibleEntries[0]).toMatchObject({
+      deviceSerial: 'device-b',
+      message: 'device b message',
     })
   })
 

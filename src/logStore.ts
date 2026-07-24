@@ -22,6 +22,7 @@ export interface LogQuery {
   searchOptions?: Partial<LogSearchOptions>
   tags?: string[]
   pids?: string[]
+  pidDeviceKeys?: string[]
   tids?: string[]
   sessions?: string[]
   devices?: string[]
@@ -59,7 +60,7 @@ export interface LogStoreSnapshot {
 }
 
 type Subscriber = () => void
-type IndexedField = 'level' | 'tag' | 'pid' | 'tid' | 'session' | 'device' | 'crash'
+type IndexedField = 'level' | 'tag' | 'pid' | 'pidDevice' | 'tid' | 'session' | 'device' | 'crash'
 
 const DEFAULT_CAPACITY = 100000
 const DEFAULT_DISPLAY_LIMIT = 1000
@@ -76,6 +77,7 @@ const EMPTY_QUERY: NormalizedLogQuery = {
   excludeMatcher: compileSearchMatcher('', normalizeSearchOptions()),
   tags: [],
   pids: [],
+  pidDeviceKeys: [],
   tids: [],
   sessions: [],
   devices: [],
@@ -91,6 +93,7 @@ interface NormalizedLogQuery {
   excludeMatcher: CompiledSearchMatcher
   tags: string[]
   pids: string[]
+  pidDeviceKeys: string[]
   tids: string[]
   sessions: string[]
   devices: string[]
@@ -154,6 +157,12 @@ function normalizeEpoch(value: number | undefined) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+export function createPidDeviceKey(deviceSerial: string | undefined, pid: string | undefined) {
+  const normalizedDevice = deviceSerial?.trim().toLowerCase()
+  const normalizedPid = pid?.trim()
+  return normalizedDevice && normalizedPid ? `${normalizedDevice}\u0000${normalizedPid}` : ''
+}
+
 function normalizeQuery(query: Partial<LogQuery>): NormalizedLogQuery {
   const searchOptions = normalizeSearchOptions(query.searchOptions)
   const includeText = query.includeText?.trim() ?? ''
@@ -168,6 +177,7 @@ function normalizeQuery(query: Partial<LogQuery>): NormalizedLogQuery {
     excludeMatcher: compileSearchMatcher(excludeText, searchOptions),
     tags: normalizeList(query.tags),
     pids: normalizeList(query.pids),
+    pidDeviceKeys: normalizeList(query.pidDeviceKeys),
     tids: normalizeList(query.tids),
     sessions: normalizeList(query.sessions),
     devices: normalizeList(query.devices),
@@ -185,6 +195,7 @@ function queryKey(query: NormalizedLogQuery) {
     searchOptions: query.searchOptions,
     tags: query.tags,
     pids: query.pids,
+    pidDeviceKeys: query.pidDeviceKeys,
     tids: query.tids,
     sessions: query.sessions,
     devices: query.devices,
@@ -249,6 +260,7 @@ export class LogStore {
   private readonly levelIndex = new Map<string, SequenceBucket>()
   private readonly tagIndex = new Map<string, SequenceBucket>()
   private readonly pidIndex = new Map<string, SequenceBucket>()
+  private readonly pidDeviceIndex = new Map<string, SequenceBucket>()
   private readonly tidIndex = new Map<string, SequenceBucket>()
   private readonly sessionIndex = new Map<string, SequenceBucket>()
   private readonly deviceIndex = new Map<string, SequenceBucket>()
@@ -383,6 +395,7 @@ export class LogStore {
     this.levelIndex.clear()
     this.tagIndex.clear()
     this.pidIndex.clear()
+    this.pidDeviceIndex.clear()
     this.tidIndex.clear()
     this.sessionIndex.clear()
     this.deviceIndex.clear()
@@ -449,6 +462,7 @@ export class LogStore {
     this.indexValue(this.sessionIndex, entry.sessionId, entry.sequence)
     this.indexValue(this.tagIndex, entry.tag, entry.sequence)
     this.indexValue(this.pidIndex, entry.pid, entry.sequence)
+    this.indexValue(this.pidDeviceIndex, createPidDeviceKey(entry.deviceSerial, entry.pid), entry.sequence)
     this.indexValue(this.tidIndex, entry.tid, entry.sequence)
     this.indexValue(this.deviceIndex, entry.deviceSerial, entry.sequence)
     if (entry.isCrash) {
@@ -478,6 +492,12 @@ export class LogStore {
       return false
     }
     if (query.pids.length > 0 && !query.pids.includes(entry.pid)) {
+      return false
+    }
+    if (
+      query.pidDeviceKeys.length > 0 &&
+      !query.pidDeviceKeys.includes(createPidDeviceKey(entry.deviceSerial, entry.pid))
+    ) {
       return false
     }
     if (query.tids.length > 0 && !query.tids.includes(entry.tid)) {
@@ -537,6 +557,11 @@ export class LogStore {
     this.addCandidate(candidates, 'level', this.sequencesForValues(this.levelIndex, query.levels))
     this.addCandidate(candidates, 'tag', this.sequencesForValues(this.tagIndex, query.tags))
     this.addCandidate(candidates, 'pid', this.sequencesForValues(this.pidIndex, query.pids))
+    this.addCandidate(
+      candidates,
+      'pidDevice',
+      this.sequencesForValues(this.pidDeviceIndex, query.pidDeviceKeys),
+    )
     this.addCandidate(candidates, 'tid', this.sequencesForValues(this.tidIndex, query.tids))
     this.addCandidate(candidates, 'session', this.sequencesForValues(this.sessionIndex, query.sessions))
     this.addCandidate(candidates, 'device', this.sequencesForValues(this.deviceIndex, query.devices))
@@ -606,6 +631,7 @@ export class LogStore {
     this.pruneIndex(this.levelIndex, minSequence)
     this.pruneIndex(this.tagIndex, minSequence)
     this.pruneIndex(this.pidIndex, minSequence)
+    this.pruneIndex(this.pidDeviceIndex, minSequence)
     this.pruneIndex(this.tidIndex, minSequence)
     this.pruneIndex(this.sessionIndex, minSequence)
     this.pruneIndex(this.deviceIndex, minSequence)

@@ -59,7 +59,7 @@ import { clearTabTransfer, putTabTransfer, takeTabTransfer } from './api/tabTran
 import appIconUrl from '../src-tauri/icons/128x128.png'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
-import { LogStore, logStore, type SerializedLogEntry } from './logStore'
+import { createPidDeviceKey, LogStore, logStore, type SerializedLogEntry } from './logStore'
 import {
   compileSearchMatcher,
   findSearchMatchRanges,
@@ -79,8 +79,8 @@ interface LogTab {
   id: string
   title: string
   store: LogStore
-  selectedSerial: string
-  session?: LogcatSessionInfo
+  selectedSerials: string[]
+  sessions: LogcatSessionInfo[]
   paused: boolean
   softWrap: boolean
   selectedLevels: LogLevel[]
@@ -89,24 +89,34 @@ interface LogTab {
   selectedPackages: string[]
   visibleLogFields: LogField[]
   columnWidths: LogColumnWidths
+  deviceSelectionManuallyConfigured: boolean
+  deviceFieldManuallyConfigured: boolean
   searchOptions: LogSearchOptions
   findText: string
   findOptions: LogSearchOptions
-  processes: AdbProcessInfo[]
-  processError: string
-  loadingProcesses: boolean
+  processesBySerial: Record<string, AdbProcessInfo[]>
+  processErrorsBySerial: Record<string, string>
+  loadingProcessesBySerial: Record<string, boolean>
   restoreSessionRunning?: boolean
 }
 
 type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
-type LogField = 'time' | 'level' | 'process' | 'tag' | 'message'
+type LogField = 'device' | 'time' | 'level' | 'process' | 'tag' | 'message'
 type LogColumnWidths = Partial<Record<LogField, number>>
+type DeviceProcessInfo = AdbProcessInfo & { serial: string }
+
+interface PackageOption {
+  name: string
+  pidLabel: string
+  serials: string[]
+}
 
 interface TabTransferPayload {
   schemaVersion: 1
   id: string
   title: string
-  selectedSerial: string
+  selectedSerial?: string
+  selectedSerials?: string[]
   paused: boolean
   softWrap: boolean
   selectedLevels: LogLevel[]
@@ -115,12 +125,16 @@ interface TabTransferPayload {
   selectedPackages: string[]
   visibleLogFields: LogField[]
   columnWidths: LogColumnWidths
+  deviceSelectionManuallyConfigured?: boolean
+  deviceFieldManuallyConfigured?: boolean
   searchOptions: LogSearchOptions
   findText?: string
   findOptions?: LogSearchOptions
   sessionRunning?: boolean
-  processes: AdbProcessInfo[]
-  processError: string
+  processes?: AdbProcessInfo[]
+  processError?: string
+  processesBySerial?: Record<string, AdbProcessInfo[]>
+  processErrorsBySerial?: Record<string, string>
   logEntries: SerializedLogEntry[]
 }
 
@@ -150,7 +164,7 @@ interface ToastMessage {
 interface PersistedLogTabState {
   id: string
   title: string
-  selectedSerial: string
+  selectedSerials: string[]
   paused: boolean
   softWrap: boolean
   selectedLevels: LogLevel[]
@@ -159,6 +173,8 @@ interface PersistedLogTabState {
   selectedPackages: string[]
   visibleLogFields: LogField[]
   columnWidths: LogColumnWidths
+  deviceSelectionManuallyConfigured: boolean
+  deviceFieldManuallyConfigured: boolean
   searchOptions: LogSearchOptions
   findText: string
   findOptions: LogSearchOptions
@@ -194,6 +210,7 @@ const LOG_LEVEL_OPTIONS: Array<{ value: LogLevel; label: string; description: st
 ]
 
 const LOG_FIELD_OPTIONS: Array<{ value: LogField; label: string; required?: boolean }> = [
+  { value: 'device', label: '设备' },
   { value: 'time', label: '时间' },
   { value: 'level', label: '级别' },
   { value: 'process', label: 'PID' },
@@ -201,7 +218,8 @@ const LOG_FIELD_OPTIONS: Array<{ value: LogField; label: string; required?: bool
   { value: 'message', label: '内容', required: true },
 ]
 
-const DEFAULT_LOG_FIELDS: LogField[] = LOG_FIELD_OPTIONS.map((option) => option.value)
+const ALL_LOG_FIELDS: LogField[] = LOG_FIELD_OPTIONS.map((option) => option.value)
+const DEFAULT_LOG_FIELDS: LogField[] = ['time', 'level', 'process', 'tag', 'message']
 const DEFAULT_SEARCH_OPTIONS: LogSearchOptions = {
   matchCase: false,
   wholeWords: false,
@@ -214,12 +232,14 @@ const DEFAULT_LOG_FONT_SIZE = 12
 const DEFAULT_LOG_ROW_PADDING = 7
 const LOG_FONT_SIZE_RANGE = { min: 10, max: 18 }
 const LOG_ROW_PADDING_RANGE = { min: 3, max: 12 }
+const LOG_SCROLL_EDGE_THRESHOLD = 18
 const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
 const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
 const APP_CLOSE_REQUESTED_EVENT = 'app://close-requested'
 
 const LOG_FIELD_COLUMNS: Record<LogField, { defaultWidth: number; minWidth: number; maxWidth: number }> = {
+  device: { defaultWidth: 170, minWidth: 112, maxWidth: 420 },
   time: { defaultWidth: 150, minWidth: 96, maxWidth: 320 },
   level: { defaultWidth: 88, minWidth: 72, maxWidth: 180 },
   process: { defaultWidth: 96, minWidth: 72, maxWidth: 220 },
@@ -227,26 +247,30 @@ const LOG_FIELD_COLUMNS: Record<LogField, { defaultWidth: number; minWidth: numb
   message: { defaultWidth: 520, minWidth: 260, maxWidth: 2400 },
 }
 
-function createLogTab(index: number, selectedSerial = ''): LogTab {
+function createLogTab(index: number, selectedSerials: string[] = []): LogTab {
+  const normalizedSerials = normalizeSelectedSerials(selectedSerials)
   return {
     id: `tab-${index}`,
     title: `Logcat ${index}`,
     store: index === 1 ? logStore : new LogStore(),
-    selectedSerial,
+    selectedSerials: normalizedSerials,
+    sessions: [],
     paused: false,
     softWrap: false,
     selectedLevels: [],
     searchText: '',
     selectedTags: [],
     selectedPackages: [],
-    visibleLogFields: [...DEFAULT_LOG_FIELDS],
+    visibleLogFields: reconcileLogFieldsForDeviceSelection(DEFAULT_LOG_FIELDS, normalizedSerials, false),
     columnWidths: {},
+    deviceSelectionManuallyConfigured: false,
+    deviceFieldManuallyConfigured: false,
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS },
     findText: '',
     findOptions: { ...DEFAULT_SEARCH_OPTIONS },
-    processes: [],
-    processError: '',
-    loadingProcesses: false,
+    processesBySerial: {},
+    processErrorsBySerial: {},
+    loadingProcessesBySerial: {},
   }
 }
 
@@ -266,6 +290,100 @@ function stringList(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
     : []
+}
+
+function normalizeSelectedSerials(value: unknown, legacySerial = '') {
+  const serials = stringList(value)
+  if (legacySerial) {
+    serials.push(legacySerial)
+  }
+  const seen = new Set<string>()
+  return serials
+    .map((serial) => serial.trim())
+    .filter((serial) => {
+      if (!serial || seen.has(serial)) {
+        return false
+      }
+      seen.add(serial)
+      return true
+    })
+}
+
+function selectedSerialsFromData(data: Record<string, unknown>) {
+  const legacySerial = typeof data.selectedSerial === 'string' ? data.selectedSerial : ''
+  return normalizeSelectedSerials(data.selectedSerials, legacySerial)
+}
+
+function reconcileLogFieldsForDeviceSelection(
+  fields: LogField[],
+  selectedSerials: string[],
+  deviceFieldManuallyConfigured: boolean,
+) {
+  const selected = new Set(fields.filter((field) => ALL_LOG_FIELDS.includes(field)))
+  selected.add('message')
+
+  if (!deviceFieldManuallyConfigured) {
+    if (selectedSerials.length > 1) {
+      selected.add('device')
+    } else {
+      selected.delete('device')
+    }
+  }
+
+  return ALL_LOG_FIELDS.filter((field) => selected.has(field))
+}
+
+function firstRecordListItem(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => isRecord(item))
+    : []
+}
+
+function normalizeProcesses(value: unknown) {
+  return firstRecordListItem(value)
+    .map((process) => ({
+      pid: typeof process.pid === 'string' ? process.pid : '',
+      name: typeof process.name === 'string' ? process.name : '',
+    }))
+    .filter((process) => process.pid && process.name)
+}
+
+function normalizeProcessesBySerial(
+  value: unknown,
+  legacySerial = '',
+  legacyProcesses: AdbProcessInfo[] = [],
+) {
+  const data = isRecord(value) ? value : {}
+  const entries = Object.entries(data).reduce<Record<string, AdbProcessInfo[]>>((result, [serial, processes]) => {
+    const normalizedSerial = serial.trim()
+    if (normalizedSerial) {
+      result[normalizedSerial] = normalizeProcesses(processes)
+    }
+    return result
+  }, {})
+
+  if (legacySerial && legacyProcesses.length > 0 && !entries[legacySerial]) {
+    entries[legacySerial] = legacyProcesses
+  }
+
+  return entries
+}
+
+function normalizeStringMap(value: unknown, legacySerial = '', legacyValue = '') {
+  const data = isRecord(value) ? value : {}
+  const entries = Object.entries(data).reduce<Record<string, string>>((result, [serial, text]) => {
+    const normalizedSerial = serial.trim()
+    if (normalizedSerial && typeof text === 'string') {
+      result[normalizedSerial] = text
+    }
+    return result
+  }, {})
+
+  if (legacySerial && legacyValue && !entries[legacySerial]) {
+    entries[legacySerial] = legacyValue
+  }
+
+  return entries
 }
 
 function normalizeTheme(value: unknown): 'light' | 'dark' {
@@ -292,7 +410,7 @@ function logColumnWidth(field: LogField, widths: LogColumnWidths) {
 
 function normalizeLogColumnWidths(value: unknown): LogColumnWidths {
   const data = isRecord(value) ? value : {}
-  return DEFAULT_LOG_FIELDS.reduce<LogColumnWidths>((widths, field) => {
+  return ALL_LOG_FIELDS.reduce<LogColumnWidths>((widths, field) => {
     const rawWidth = Number(data[field])
     if (Number.isFinite(rawWidth)) {
       widths[field] = clampLogColumnWidth(field, rawWidth)
@@ -303,18 +421,27 @@ function normalizeLogColumnWidths(value: unknown): LogColumnWidths {
 
 function normalizePersistedTabState(value: unknown, index: number): PersistedLogTabState {
   const data = isRecord(value) ? value : {}
+  const selectedSerials = selectedSerialsFromData(data)
+  const deviceSelectionManuallyConfigured = Boolean(data.deviceSelectionManuallyConfigured)
+  const deviceFieldManuallyConfigured = Boolean(data.deviceFieldManuallyConfigured)
   return {
     id: typeof data.id === 'string' && data.id.trim() ? data.id : `tab-${index + 1}`,
     title: typeof data.title === 'string' && data.title.trim() ? data.title.trim().slice(0, 80) : `Logcat ${index + 1}`,
-    selectedSerial: typeof data.selectedSerial === 'string' ? data.selectedSerial : '',
+    selectedSerials,
     paused: Boolean(data.paused),
     softWrap: Boolean(data.softWrap),
     selectedLevels: normalizeLogLevels(data.selectedLevels),
     searchText: typeof data.searchText === 'string' ? data.searchText : '',
     selectedTags: stringList(data.selectedTags),
     selectedPackages: stringList(data.selectedPackages),
-    visibleLogFields: normalizeLogFields(stringList(data.visibleLogFields) as LogField[]),
+    visibleLogFields: reconcileLogFieldsForDeviceSelection(
+      stringList(data.visibleLogFields) as LogField[],
+      selectedSerials,
+      deviceFieldManuallyConfigured,
+    ),
     columnWidths: normalizeLogColumnWidths(data.columnWidths),
+    deviceSelectionManuallyConfigured,
+    deviceFieldManuallyConfigured,
     searchOptions: normalizeSearchOptions(isRecord(data.searchOptions) ? data.searchOptions : undefined),
     findText: typeof data.findText === 'string' ? data.findText : '',
     findOptions: normalizeSearchOptions(isRecord(data.findOptions) ? data.findOptions : undefined),
@@ -366,7 +493,7 @@ function readPersistedAppState(): PersistedAppState | undefined {
 }
 
 function createLogTabFromPersistedState(state: PersistedLogTabState, index: number, existingIds: Set<string>) {
-  const tab = createLogTab(index + 1, state.selectedSerial)
+  const tab = createLogTab(index + 1, state.selectedSerials)
   return {
     ...tab,
     id: uniqueTabId(state.id, existingIds),
@@ -377,8 +504,14 @@ function createLogTabFromPersistedState(state: PersistedLogTabState, index: numb
     searchText: state.searchText,
     selectedTags: [...state.selectedTags],
     selectedPackages: [...state.selectedPackages],
-    visibleLogFields: normalizeLogFields(state.visibleLogFields),
+    visibleLogFields: reconcileLogFieldsForDeviceSelection(
+      state.visibleLogFields,
+      state.selectedSerials,
+      state.deviceFieldManuallyConfigured,
+    ),
     columnWidths: normalizeLogColumnWidths(state.columnWidths),
+    deviceSelectionManuallyConfigured: state.deviceSelectionManuallyConfigured,
+    deviceFieldManuallyConfigured: state.deviceFieldManuallyConfigured,
     searchOptions: { ...state.searchOptions },
     findText: state.findText,
     findOptions: { ...state.findOptions },
@@ -469,9 +602,9 @@ function readDetachedTransferId() {
 }
 
 function normalizeLogFields(fields: LogField[]) {
-  const selected = new Set(fields.filter((field) => DEFAULT_LOG_FIELDS.includes(field)))
+  const selected = new Set(fields.filter((field) => ALL_LOG_FIELDS.includes(field)))
   selected.add('message')
-  return DEFAULT_LOG_FIELDS.filter((field) => selected.has(field))
+  return ALL_LOG_FIELDS.filter((field) => selected.has(field))
 }
 
 function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTransferPayload {
@@ -479,7 +612,8 @@ function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTrans
     schemaVersion: TAB_TRANSFER_SCHEMA_VERSION,
     id: tab.id,
     title: tab.title,
-    selectedSerial: tab.selectedSerial,
+    selectedSerial: tab.selectedSerials[0] ?? '',
+    selectedSerials: [...tab.selectedSerials],
     paused: tab.paused,
     softWrap: tab.softWrap,
     selectedLevels: [...tab.selectedLevels],
@@ -488,12 +622,14 @@ function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTrans
     selectedPackages: [...tab.selectedPackages],
     visibleLogFields: normalizeLogFields(tab.visibleLogFields),
     columnWidths: normalizeLogColumnWidths(tab.columnWidths),
+    deviceSelectionManuallyConfigured: tab.deviceSelectionManuallyConfigured,
+    deviceFieldManuallyConfigured: tab.deviceFieldManuallyConfigured,
     searchOptions: { ...tab.searchOptions },
     findText: tab.findText,
     findOptions: { ...tab.findOptions },
     sessionRunning,
-    processes: [...tab.processes],
-    processError: tab.processError,
+    processesBySerial: { ...tab.processesBySerial },
+    processErrorsBySerial: { ...tab.processErrorsBySerial },
     logEntries: tab.store.getTransferEntries(),
   }
 }
@@ -527,25 +663,44 @@ function uniqueTabId(preferredId: string, existingIds: Set<string>) {
 function createTabFromTransferPayload(payload: TabTransferPayload, existingIds = new Set<string>()) {
   const store = new LogStore()
   store.hydrateTransferEntries(payload.logEntries ?? [])
+  const selectedSerials = normalizeSelectedSerials(payload.selectedSerials, payload.selectedSerial ?? '')
+  const legacyProcesses = normalizeProcesses(payload.processes)
+  const deviceSelectionManuallyConfigured = Boolean(payload.deviceSelectionManuallyConfigured)
+  const deviceFieldManuallyConfigured = Boolean(payload.deviceFieldManuallyConfigured)
   return {
     id: uniqueTabId(payload.id || `tab-${Date.now()}`, existingIds),
     title: payload.title || 'Logcat',
     store,
-    selectedSerial: payload.selectedSerial ?? '',
+    selectedSerials,
+    sessions: [],
     paused: Boolean(payload.paused),
     softWrap: Boolean(payload.softWrap),
     selectedLevels: payload.selectedLevels ?? [],
     searchText: payload.searchText ?? '',
     selectedTags: payload.selectedTags ?? [],
     selectedPackages: payload.selectedPackages ?? [],
-    visibleLogFields: normalizeLogFields(payload.visibleLogFields ?? DEFAULT_LOG_FIELDS),
+    visibleLogFields: reconcileLogFieldsForDeviceSelection(
+      payload.visibleLogFields ?? DEFAULT_LOG_FIELDS,
+      selectedSerials,
+      deviceFieldManuallyConfigured,
+    ),
     columnWidths: normalizeLogColumnWidths(payload.columnWidths),
+    deviceSelectionManuallyConfigured,
+    deviceFieldManuallyConfigured,
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.searchOptions },
     findText: payload.findText ?? '',
     findOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.findOptions },
-    processes: payload.processes ?? [],
-    processError: payload.processError ?? '',
-    loadingProcesses: false,
+    processesBySerial: normalizeProcessesBySerial(
+      payload.processesBySerial,
+      payload.selectedSerial ?? selectedSerials[0] ?? '',
+      legacyProcesses,
+    ),
+    processErrorsBySerial: normalizeStringMap(
+      payload.processErrorsBySerial,
+      payload.selectedSerial ?? selectedSerials[0] ?? '',
+      payload.processError ?? '',
+    ),
+    loadingProcessesBySerial: {},
     restoreSessionRunning: Boolean(payload.sessionRunning),
   } satisfies LogTab
 }
@@ -588,6 +743,14 @@ function waitForWindowCreated(window: WebviewWindow) {
   })
 }
 
+async function stopLogcatSessions(sessions: LogcatSessionInfo[]) {
+  await Promise.allSettled(
+    sessions
+      .filter((session) => session.sessionId)
+      .map((session) => stopLogcat(session.sessionId)),
+  )
+}
+
 function parseDeviceDescription(description: string) {
   return Object.fromEntries(
     description
@@ -608,37 +771,134 @@ function deviceSubtitle(device: AdbDevice) {
   return details.join(' · ')
 }
 
+function deviceLabelForSerial(serial: string | undefined, devices: AdbDevice[]) {
+  if (!serial) {
+    return '-'
+  }
+  const device = devices.find((item) => item.serial === serial)
+  return device ? deviceTitle(device) : serial
+}
+
+function deviceFilterLabel(selectedSerials: string[], onlineDevices: AdbDevice[]) {
+  if (onlineDevices.length === 0) {
+    return '设备 无'
+  }
+  if (selectedSerials.length === 0) {
+    return '设备 未选'
+  }
+  if (selectedSerials.length === 1) {
+    return `设备 ${deviceLabelForSerial(selectedSerials[0], onlineDevices)}`
+  }
+  if (selectedSerials.length === onlineDevices.length) {
+    return `设备 全部 ${selectedSerials.length}`
+  }
+  return `设备 ${selectedSerials.length}/${onlineDevices.length}`
+}
+
+function selectedDeviceSummary(selectedSerials: string[], onlineDevices: AdbDevice[]) {
+  if (selectedSerials.length === 0) {
+    return '等待设备连接'
+  }
+  if (selectedSerials.length === 1) {
+    return deviceLabelForSerial(selectedSerials[0], onlineDevices)
+  }
+  return `${selectedSerials.length} 台设备`
+}
+
 function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
 
-function packageOptions(processes: AdbProcessInfo[]) {
-  const seen = new Set<string>()
-  return processes
-    .filter((process) => {
-      if (!process.name || process.name.startsWith('[') || seen.has(process.name)) {
-        return false
-      }
-      seen.add(process.name)
-      return true
-    })
+function processesForSelectedDevices(
+  processesBySerial: Record<string, AdbProcessInfo[]>,
+  selectedSerials: string[],
+) {
+  return selectedSerials.flatMap((serial) =>
+    (processesBySerial[serial] ?? []).map((process) => ({ ...process, serial })),
+  )
+}
+
+function packageOptions(processes: DeviceProcessInfo[]) {
+  const grouped = new Map<string, { pids: Set<string>; serials: Set<string> }>()
+  for (const process of processes) {
+    if (!process.name || process.name.startsWith('[')) {
+      continue
+    }
+    const group = grouped.get(process.name) ?? { pids: new Set<string>(), serials: new Set<string>() }
+    group.pids.add(process.pid)
+    group.serials.add(process.serial)
+    grouped.set(process.name, group)
+  }
+
+  return [...grouped.entries()]
+    .map<PackageOption>(([name, group]) => ({
+      name,
+      pidLabel: [...group.pids].slice(0, 3).join(', '),
+      serials: [...group.serials],
+    }))
     .sort((first, second) => first.name.localeCompare(second.name))
 }
 
-function packagePids(processes: AdbProcessInfo[], selectedPackages: string[]) {
+function packagePidDeviceKeys(processes: DeviceProcessInfo[], selectedPackages: string[]) {
   const selected = new Set(selectedPackages)
-  return processes
-    .filter((process) => selected.has(process.name))
-    .map((process) => process.pid)
+  return [
+    ...new Set(
+      processes
+        .filter((process) => selected.has(process.name))
+        .map((process) => createPidDeviceKey(process.serial, process.pid))
+        .filter(Boolean),
+    ),
+  ]
 }
 
-function filterPackageOptions(processes: AdbProcessInfo[], query: string) {
+function filterPackageOptions(processes: DeviceProcessInfo[], query: string) {
   const normalizedQuery = query.trim().toLowerCase()
   const options = packageOptions(processes)
   if (!normalizedQuery) {
     return options
   }
   return options.filter((process) => process.name.toLowerCase().includes(normalizedQuery))
+}
+
+function pruneSelectedPackages(selectedPackages: string[], processes: DeviceProcessInfo[]) {
+  const availablePackages = new Set(packageOptions(processes).map((process) => process.name))
+  return selectedPackages.filter((packageName) => availablePackages.has(packageName))
+}
+
+function reconcileTabDevices(tab: LogTab, onlineSerials: string[]) {
+  const onlineSet = new Set(onlineSerials)
+  const retainedSerials = tab.selectedSerials.filter((serial) => onlineSet.has(serial))
+  const selectedSerials =
+    !tab.deviceSelectionManuallyConfigured && onlineSerials.length > 0
+      ? onlineSerials
+      : retainedSerials.length > 0
+        ? retainedSerials
+        : onlineSerials
+  const selectedSet = new Set(selectedSerials)
+  const processesBySerial = Object.fromEntries(
+    Object.entries(tab.processesBySerial).filter(([serial]) => selectedSet.has(serial)),
+  )
+  const processErrorsBySerial = Object.fromEntries(
+    Object.entries(tab.processErrorsBySerial).filter(([serial]) => selectedSet.has(serial)),
+  )
+  const loadingProcessesBySerial = Object.fromEntries(
+    Object.entries(tab.loadingProcessesBySerial).filter(([serial]) => selectedSet.has(serial)),
+  )
+  const processes = processesForSelectedDevices(processesBySerial, selectedSerials)
+
+  return {
+    ...tab,
+    selectedSerials,
+    selectedPackages: pruneSelectedPackages(tab.selectedPackages, processes),
+    visibleLogFields: reconcileLogFieldsForDeviceSelection(
+      tab.visibleLogFields,
+      selectedSerials,
+      tab.deviceFieldManuallyConfigured,
+    ),
+    processesBySerial,
+    processErrorsBySerial,
+    loadingProcessesBySerial,
+  }
 }
 
 function filterTextOptions(options: string[], query: string) {
@@ -680,6 +940,10 @@ function buildLogMinWidth(fields: LogField[], widths: LogColumnWidths) {
   return `${Math.max(minWidth, 260)}px`
 }
 
+function isScrollNearBottom(element: HTMLElement) {
+  return element.scrollTop + element.clientHeight >= element.scrollHeight - LOG_SCROLL_EDGE_THRESHOLD
+}
+
 function clampNumber(value: number, min: number, max: number) {
   if (!Number.isFinite(value)) {
     return min
@@ -712,7 +976,7 @@ function serializeTabForPersistence(tab: LogTab): PersistedLogTabState {
   return {
     id: tab.id,
     title: tab.title,
-    selectedSerial: tab.selectedSerial,
+    selectedSerials: [...tab.selectedSerials],
     paused: tab.paused,
     softWrap: tab.softWrap,
     selectedLevels: [...tab.selectedLevels],
@@ -721,6 +985,8 @@ function serializeTabForPersistence(tab: LogTab): PersistedLogTabState {
     selectedPackages: [...tab.selectedPackages],
     visibleLogFields: normalizeLogFields(tab.visibleLogFields),
     columnWidths: normalizeLogColumnWidths(tab.columnWidths),
+    deviceSelectionManuallyConfigured: tab.deviceSelectionManuallyConfigured,
+    deviceFieldManuallyConfigured: tab.deviceFieldManuallyConfigured,
     searchOptions: { ...tab.searchOptions },
     findText: tab.findText,
     findOptions: { ...tab.findOptions },
@@ -784,6 +1050,7 @@ function App() {
   const [isExporting, setIsExporting] = useState(false)
   const [toast, setToast] = useState<ToastMessage>()
   const [drawerOpen, setDrawerOpen] = useState(initialAppState.drawerOpen)
+  const [deviceMenuOpen, setDeviceMenuOpen] = useState(false)
   const [packageMenuOpen, setPackageMenuOpen] = useState(false)
   const [packageSearch, setPackageSearch] = useState('')
   const [levelMenuOpen, setLevelMenuOpen] = useState(false)
@@ -817,6 +1084,7 @@ function App() {
   const findInputRef = useRef<HTMLInputElement>(null)
   const logListRef = useRef<HTMLDivElement>(null)
   const logScrollTopByTabRef = useRef<Record<string, number>>({})
+  const logStickToBottomByTabRef = useRef<Record<string, boolean>>({})
   const pendingLogScrollRef = useRef<'top' | 'bottom'>()
   const columnResizeRef = useRef<{
     tabId: string
@@ -825,6 +1093,7 @@ function App() {
     startWidth: number
   }>()
   const logSchemeSelectRef = useRef<HTMLDivElement>(null)
+  const deviceFilterRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
   const tagFilterRef = useRef<HTMLDivElement>(null)
@@ -937,13 +1206,23 @@ function App() {
     () => devices.filter((device) => device.state === 'device'),
     [devices],
   )
-  const selectedDevice = onlineDevices.find((device) => device.serial === activeTab.selectedSerial)
-  const isRunning = Boolean(activeTab.session?.running)
+  const selectedSerialSet = useMemo(() => new Set(activeTab.selectedSerials), [activeTab.selectedSerials])
+  const activeProcesses = useMemo(
+    () => processesForSelectedDevices(activeTab.processesBySerial, activeTab.selectedSerials),
+    [activeTab.processesBySerial, activeTab.selectedSerials],
+  )
+  const hasSelectedDevice = activeTab.selectedSerials.length > 0
+  const isRunning = activeTab.sessions.some((session) => session.running)
   const isStarting = startingTabId === activeTab.id
   const activeLogWindowStart = logWindowStarts[activeTabId] ?? 0
   const visibleLogs = activeStore.getVisibleEntriesWindow(activeLogWindowStart)
-  const packages = packageOptions(activeTab.processes)
-  const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
+  const packages = packageOptions(activeProcesses)
+  const visiblePackages = filterPackageOptions(activeProcesses, packageSearch)
+  const processError = activeTab.selectedSerials
+    .map((serial) => activeTab.processErrorsBySerial[serial])
+    .filter(Boolean)
+    .join(' / ')
+  const loadingProcesses = activeTab.selectedSerials.some((serial) => activeTab.loadingProcessesBySerial[serial])
   const visibleTags = filterTextOptions(logSnapshot.tagOptions, tagSearch)
   const activeFilterMatcher = useMemo(
     () => compileSearchMatcher(activeTab.searchText, activeTab.searchOptions),
@@ -979,11 +1258,14 @@ function App() {
   )
 
   const resetLogWindowForTab = useCallback(
-    (tabId: string) => {
+    (tabId: string, options: { stickToBottom?: boolean } = {}) => {
+      const nextStickToBottom =
+        options.stickToBottom ?? logStickToBottomByTabRef.current[tabId] ?? true
       logScrollTopByTabRef.current[tabId] = 0
+      logStickToBottomByTabRef.current[tabId] = nextStickToBottom
       setLogWindowStarts((current) => (current[tabId] === 0 ? current : { ...current, [tabId]: 0 }))
       if (tabId === activeTabId) {
-        pendingLogScrollRef.current = 'top'
+        pendingLogScrollRef.current = nextStickToBottom ? 'bottom' : 'top'
       }
     },
     [activeTabId],
@@ -1004,10 +1286,27 @@ function App() {
   }, [activeTabId])
 
   const handleLogScroll = useCallback(() => {
-    if (logListRef.current) {
-      logScrollTopByTabRef.current[activeTabId] = logListRef.current.scrollTop
+    const scrollFrame = logListRef.current
+    if (scrollFrame) {
+      logScrollTopByTabRef.current[activeTabId] = scrollFrame.scrollTop
+      const atBottom = isScrollNearBottom(scrollFrame)
+      logStickToBottomByTabRef.current[activeTabId] = atBottom
+
+      if (atBottom) {
+        const latestWindowStart = Math.max(0, logSnapshot.filteredCount - logSnapshot.displayLimit)
+        if (activeLogWindowStart < latestWindowStart) {
+          pendingLogScrollRef.current = 'bottom'
+          setActiveLogWindowStart(latestWindowStart)
+        }
+      }
     }
-  }, [activeTabId])
+  }, [
+    activeLogWindowStart,
+    activeTabId,
+    logSnapshot.displayLimit,
+    logSnapshot.filteredCount,
+    setActiveLogWindowStart,
+  ])
 
   const scrollLogToTop = useCallback(() => {
     const scrollFrame = logListRef.current
@@ -1015,6 +1314,7 @@ function App() {
       return
     }
     pendingLogScrollRef.current = 'top'
+    logStickToBottomByTabRef.current[activeTabId] = false
     setActiveLogWindowStart(0)
     logScrollTopByTabRef.current[activeTabId] = 0
     scrollFrame.scrollTo({ top: 0, behavior: 'smooth' })
@@ -1030,6 +1330,7 @@ function App() {
     }
     const startIndex = Math.max(0, logSnapshot.filteredCount - logSnapshot.displayLimit)
     pendingLogScrollRef.current = 'bottom'
+    logStickToBottomByTabRef.current[activeTabId] = true
     setActiveLogWindowStart(startIndex)
     const top = scrollFrame.scrollHeight
     logScrollTopByTabRef.current[activeTabId] = top
@@ -1080,6 +1381,22 @@ function App() {
     if (!scrollFrame) {
       return
     }
+
+    const stickToBottom = logStickToBottomByTabRef.current[activeTabId] ?? true
+    if (stickToBottom) {
+      const latestWindowStart = Math.max(0, logSnapshot.filteredCount - logSnapshot.displayLimit)
+      if (activeLogWindowStart !== latestWindowStart) {
+        pendingLogScrollRef.current = 'bottom'
+        setActiveLogWindowStart(latestWindowStart)
+        return
+      }
+
+      scrollFrame.scrollTop = scrollFrame.scrollHeight
+      logScrollTopByTabRef.current[activeTabId] = scrollFrame.scrollTop
+      pendingLogScrollRef.current = undefined
+      return
+    }
+
     if (applyPendingLogScroll()) {
       return
     }
@@ -1090,7 +1407,15 @@ function App() {
       scrollFrame.scrollTop = nextTop
     }
     logScrollTopByTabRef.current[activeTabId] = nextTop
-  }, [activeLogWindowStart, activeTabId, applyPendingLogScroll, logSnapshot.version])
+  }, [
+    activeLogWindowStart,
+    activeTabId,
+    applyPendingLogScroll,
+    logSnapshot.displayLimit,
+    logSnapshot.filteredCount,
+    logSnapshot.version,
+    setActiveLogWindowStart,
+  ])
 
   useLayoutEffect(() => {
     if (logListRef.current) {
@@ -1176,6 +1501,7 @@ function App() {
   ])
 
   useEffect(() => {
+    setDeviceMenuOpen(false)
     setPackageMenuOpen(false)
     setPackageSearch('')
     setLevelMenuOpen(false)
@@ -1188,10 +1514,18 @@ function App() {
   }, [activeTabId])
 
   useEffect(() => {
-    if (!packageMenuOpen && !levelMenuOpen && !tagMenuOpen && !contentMenuOpen && !logSchemeMenuOpen) {
+    if (
+      !deviceMenuOpen &&
+      !packageMenuOpen &&
+      !levelMenuOpen &&
+      !tagMenuOpen &&
+      !contentMenuOpen &&
+      !logSchemeMenuOpen
+    ) {
       return undefined
     }
 
+    const closeDeviceMenu = () => setDeviceMenuOpen(false)
     const closePackageMenu = () => {
       setPackageMenuOpen(false)
       setPackageSearch('')
@@ -1209,12 +1543,16 @@ function App() {
       }
 
       const clickedLogSchemeSelect = logSchemeSelectRef.current?.contains(event.target) ?? false
+      const clickedDeviceFilter = deviceFilterRef.current?.contains(event.target) ?? false
       const clickedPackageFilter = packageFilterRef.current?.contains(event.target) ?? false
       const clickedLevelFilter = levelFilterRef.current?.contains(event.target) ?? false
       const clickedTagFilter = tagFilterRef.current?.contains(event.target) ?? false
       const clickedContentFilter = contentFilterRef.current?.contains(event.target) ?? false
       if (logSchemeMenuOpen && !clickedLogSchemeSelect) {
         closeLogSchemeMenu()
+      }
+      if (deviceMenuOpen && !clickedDeviceFilter) {
+        closeDeviceMenu()
       }
       if (packageMenuOpen && !clickedPackageFilter) {
         closePackageMenu()
@@ -1232,6 +1570,7 @@ function App() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         closeLogSchemeMenu()
+        closeDeviceMenu()
         closePackageMenu()
         closeLevelMenu()
         closeTagMenu()
@@ -1245,7 +1584,7 @@ function App() {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [contentMenuOpen, levelMenuOpen, logSchemeMenuOpen, packageMenuOpen, tagMenuOpen])
+  }, [contentMenuOpen, deviceMenuOpen, levelMenuOpen, logSchemeMenuOpen, packageMenuOpen, tagMenuOpen])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
@@ -1357,21 +1696,31 @@ function App() {
         return
       }
 
-      updateTab(tabId, (tab) => ({ ...tab, loadingProcesses: true, processError: '' }))
+      updateTab(tabId, (tab) => ({
+        ...tab,
+        loadingProcessesBySerial: { ...tab.loadingProcessesBySerial, [serial]: true },
+        processErrorsBySerial: { ...tab.processErrorsBySerial, [serial]: '' },
+      }))
       try {
         const result = await listAdbProcesses(serial)
         updateTab(tabId, (tab) => ({
           ...tab,
-          processes: result.processes,
-          processError: result.ok ? '' : result.error ?? '读取进程列表失败',
-          loadingProcesses: false,
+          processesBySerial: { ...tab.processesBySerial, [serial]: result.processes },
+          processErrorsBySerial: {
+            ...tab.processErrorsBySerial,
+            [serial]: result.ok ? '' : result.error ?? '读取进程列表失败',
+          },
+          loadingProcessesBySerial: { ...tab.loadingProcessesBySerial, [serial]: false },
         }))
       } catch (error) {
         updateTab(tabId, (tab) => ({
           ...tab,
-          processes: [],
-          processError: error instanceof Error ? error.message : String(error),
-          loadingProcesses: false,
+          processesBySerial: { ...tab.processesBySerial, [serial]: [] },
+          processErrorsBySerial: {
+            ...tab.processErrorsBySerial,
+            [serial]: error instanceof Error ? error.message : String(error),
+          },
+          loadingProcessesBySerial: { ...tab.loadingProcessesBySerial, [serial]: false },
         }))
       }
     },
@@ -1386,21 +1735,11 @@ function App() {
       const result = await listAdbDevices()
       const nextDevices = result.devices ?? []
       const nextOnlineDevices = nextDevices.filter((device) => device.state === 'device')
+      const nextOnlineSerials = nextOnlineDevices.map((device) => device.serial)
 
       setAdbInfo(result.adb)
       setDevices(nextDevices)
-      setTabs((current) =>
-        current.map((tab) => {
-          if (tab.selectedSerial && nextOnlineDevices.some((device) => device.serial === tab.selectedSerial)) {
-            return tab
-          }
-          return {
-            ...tab,
-            selectedSerial: nextOnlineDevices[0]?.serial ?? '',
-            processes: [],
-          }
-        }),
-      )
+      setTabs((current) => current.map((tab) => reconcileTabDevices(tab, nextOnlineSerials)))
 
       if (!result.ok) {
         setDeviceError(result.error ?? '读取设备列表失败')
@@ -1409,11 +1748,7 @@ function App() {
       setDeviceError(error instanceof Error ? error.message : String(error))
       setDevices([])
       setTabs((current) =>
-        current.map((tab) => ({
-          ...tab,
-          selectedSerial: '',
-          processes: [],
-        })),
+        current.map((tab) => reconcileTabDevices(tab, [])),
       )
     } finally {
       setLoadingDevices(false)
@@ -1425,27 +1760,54 @@ function App() {
       tabId: string,
       clearBeforeStart: boolean,
       options: { preservePaused?: boolean } = {},
+      selectedSerialsOverride?: string[],
     ) => {
       const tab = tabsRef.current.find((item) => item.id === tabId)
-      if (!tab?.selectedSerial) {
+      const selectedSerials = normalizeSelectedSerials(selectedSerialsOverride ?? tab?.selectedSerials ?? [])
+      if (!tab || selectedSerials.length === 0) {
         return
       }
 
-      if (tab.session?.sessionId) {
-        await stopLogcat(tab.session.sessionId)
-      }
+      await stopLogcatSessions(tab.sessions)
       if (clearBeforeStart) {
-        resetLogWindowForTab(tabId)
+        resetLogWindowForTab(tabId, { stickToBottom: true })
         tab.store.clear()
       }
 
       setLogError('')
       setStartingTabId(tabId)
       try {
-        const nextSession = await startLogcat(tab.selectedSerial)
+        const results = await Promise.allSettled(selectedSerials.map((serial) => startLogcat(serial)))
+        const nextSessions: LogcatSessionInfo[] = []
+        const errors: string[] = []
+
+        results.forEach((result, index) => {
+          const serial = selectedSerials[index]
+          if (result.status === 'fulfilled') {
+            nextSessions.push(result.value)
+          } else {
+            const reason = result.reason
+            errors.push(
+              `${deviceLabelForSerial(serial, onlineDevices)}：${
+                reason instanceof Error ? reason.message : String(reason)
+              }`,
+            )
+          }
+        })
+
+        if (errors.length > 0) {
+          setLogError(errors.join(' / '))
+        }
+
         updateTab(tabId, (current) => ({
           ...current,
-          session: nextSession,
+          selectedSerials,
+          sessions: nextSessions,
+          visibleLogFields: reconcileLogFieldsForDeviceSelection(
+            current.visibleLogFields,
+            selectedSerials,
+            current.deviceFieldManuallyConfigured,
+          ),
           paused: options.preservePaused ? current.paused : false,
           restoreSessionRunning: false,
         }))
@@ -1453,7 +1815,7 @@ function App() {
         setLogError(error instanceof Error ? error.message : String(error))
         updateTab(tabId, (current) => ({
           ...current,
-          session: undefined,
+          sessions: [],
           paused: options.preservePaused ? current.paused : false,
           restoreSessionRunning: false,
         }))
@@ -1461,7 +1823,7 @@ function App() {
         setStartingTabId('')
       }
     },
-    [resetLogWindowForTab, updateTab],
+    [onlineDevices, resetLogWindowForTab, updateTab],
   )
 
   const handleStartPause = useCallback(() => {
@@ -1476,8 +1838,56 @@ function App() {
     void startTabLogcat(activeTab.id, true)
   }, [activeTab.id, startTabLogcat])
 
+  const toggleDevice = useCallback(
+    (serial: string) => {
+      const currentTab = tabsRef.current.find((tab) => tab.id === activeTab.id) ?? activeTab
+      const selected = new Set(currentTab.selectedSerials)
+      if (selected.has(serial)) {
+        if (selected.size <= 1) {
+          return
+        }
+        selected.delete(serial)
+      } else {
+        selected.add(serial)
+      }
+
+      const nextSerials = onlineDevices
+        .map((device) => device.serial)
+        .filter((deviceSerial) => selected.has(deviceSerial))
+
+      updateActiveTab((tab) => {
+        const processes = processesForSelectedDevices(tab.processesBySerial, nextSerials)
+        return {
+          ...tab,
+          selectedSerials: nextSerials,
+          deviceSelectionManuallyConfigured: true,
+          selectedPackages: pruneSelectedPackages(tab.selectedPackages, processes),
+          visibleLogFields: reconcileLogFieldsForDeviceSelection(
+            tab.visibleLogFields,
+            nextSerials,
+            tab.deviceFieldManuallyConfigured,
+          ),
+        }
+      })
+
+      for (const nextSerial of nextSerials) {
+        if (
+          !currentTab.processesBySerial[nextSerial] &&
+          !currentTab.loadingProcessesBySerial[nextSerial]
+        ) {
+          void refreshProcesses(activeTab.id, nextSerial)
+        }
+      }
+
+      if (currentTab.sessions.some((session) => session.running)) {
+        void startTabLogcat(activeTab.id, false, { preservePaused: true }, nextSerials)
+      }
+    },
+    [activeTab, onlineDevices, refreshProcesses, startTabLogcat, updateActiveTab],
+  )
+
   const handleClearLogs = useCallback(() => {
-    resetLogWindowForTab(activeTab.id)
+    resetLogWindowForTab(activeTab.id, { stickToBottom: true })
     activeTab.store.clear()
   }, [activeTab.id, activeTab.store, resetLogWindowForTab])
 
@@ -1517,6 +1927,7 @@ function App() {
   const handleExitApp = useCallback(async () => {
     setClosingApp(true)
     try {
+      await Promise.all(tabsRef.current.map((tab) => stopLogcatSessions(tab.sessions)))
       await closeApp()
     } catch (error) {
       setClosingApp(false)
@@ -1605,7 +2016,9 @@ function App() {
         selected.add('message')
         return {
           ...tab,
-          visibleLogFields: DEFAULT_LOG_FIELDS.filter((item) => selected.has(item)),
+          deviceFieldManuallyConfigured:
+            field === 'device' ? true : tab.deviceFieldManuallyConfigured,
+          visibleLogFields: ALL_LOG_FIELDS.filter((item) => selected.has(item)),
         }
       })
     },
@@ -1641,7 +2054,7 @@ function App() {
   const addTab = useCallback(() => {
     const nextIndex = nextTabIndexRef.current
     nextTabIndexRef.current += 1
-    const tab = createLogTab(nextIndex, onlineDevices[0]?.serial ?? '')
+    const tab = createLogTab(nextIndex, onlineDevices.map((device) => device.serial))
     setTabs((current) => [...current, tab])
     setActiveTabId(tab.id)
   }, [onlineDevices])
@@ -1650,7 +2063,10 @@ function App() {
     (tabId: string) => {
       setTabs((current) => {
         if (current.length === 1) {
-          const replacement = createLogTab(nextTabIndexRef.current, onlineDevices[0]?.serial ?? '')
+          const replacement = createLogTab(
+            nextTabIndexRef.current,
+            onlineDevices.map((device) => device.serial),
+          )
           nextTabIndexRef.current += 1
           setActiveTabId(replacement.id)
           return [replacement]
@@ -1668,8 +2084,8 @@ function App() {
   const closeTab = useCallback(
     (tabId: string) => {
       const tab = tabsRef.current.find((item) => item.id === tabId)
-      if (tab?.session?.sessionId) {
-        void stopLogcat(tab.session.sessionId)
+      if (tab?.sessions.length) {
+        void stopLogcatSessions(tab.sessions)
       }
       removeTabFromMain(tabId)
     },
@@ -1712,17 +2128,15 @@ function App() {
       setLogError('')
 
       try {
-        const wasRunning = Boolean(tab.session?.running)
+        const wasRunning = tab.sessions.some((session) => session.running)
         const wasPaused = tab.paused
-        if (tab.session?.sessionId) {
-          await stopLogcat(tab.session.sessionId)
-        }
+        await stopLogcatSessions(tab.sessions)
 
         const latestTab = tabsRef.current.find((item) => item.id === tabId) ?? tab
         const payload = serializeTabForTransfer(
           {
             ...latestTab,
-            session: undefined,
+            sessions: [],
             paused: wasPaused,
           },
           wasRunning,
@@ -1763,17 +2177,15 @@ function App() {
     setLogError('')
 
     try {
-      const wasRunning = Boolean(activeTab.session?.running)
+      const wasRunning = activeTab.sessions.some((session) => session.running)
       const wasPaused = activeTab.paused
-      if (activeTab.session?.sessionId) {
-        await stopLogcat(activeTab.session.sessionId)
-      }
+      await stopLogcatSessions(activeTab.sessions)
 
       const latestTab = tabsRef.current.find((item) => item.id === activeTab.id) ?? activeTab
       const payload = serializeTabForTransfer(
         {
           ...latestTab,
-          session: undefined,
+          sessions: [],
           paused: wasPaused,
         },
         wasRunning,
@@ -1856,14 +2268,16 @@ function App() {
   }, [refreshDevices])
 
   useEffect(() => {
-    if (activeTab.selectedSerial && activeTab.processes.length === 0 && !activeTab.loadingProcesses) {
-      void refreshProcesses(activeTab.id, activeTab.selectedSerial)
+    for (const serial of activeTab.selectedSerials) {
+      if (!activeTab.processesBySerial[serial] && !activeTab.loadingProcessesBySerial[serial]) {
+        void refreshProcesses(activeTab.id, serial)
+      }
     }
   }, [
     activeTab.id,
-    activeTab.loadingProcesses,
-    activeTab.processes.length,
-    activeTab.selectedSerial,
+    activeTab.loadingProcessesBySerial,
+    activeTab.processesBySerial,
+    activeTab.selectedSerials,
     refreshProcesses,
   ])
 
@@ -1875,8 +2289,8 @@ function App() {
       !adbInfo?.available ||
       onlineDevices.length === 0 ||
       startingTabId === activeTab.id ||
-      activeTab.session?.running ||
-      !activeTab.selectedSerial
+      activeTab.sessions.some((session) => session.running) ||
+      activeTab.selectedSerials.length === 0
     ) {
       return
     }
@@ -1885,8 +2299,8 @@ function App() {
     void startTabLogcat(activeTab.id, false)
   }, [
     activeTab.id,
-    activeTab.selectedSerial,
-    activeTab.session?.running,
+    activeTab.selectedSerials,
+    activeTab.sessions,
     adbInfo?.available,
     isDetachedWindow,
     loadingDevices,
@@ -1897,12 +2311,15 @@ function App() {
 
   useEffect(() => {
     const pendingTab = tabs.find(
-      (tab) => tab.restoreSessionRunning && !tab.session?.running && startingTabId !== tab.id,
+      (tab) =>
+        tab.restoreSessionRunning &&
+        !tab.sessions.some((session) => session.running) &&
+        startingTabId !== tab.id,
     )
     if (!pendingTab) {
       return
     }
-    if (!pendingTab.selectedSerial) {
+    if (pendingTab.selectedSerials.length === 0) {
       updateTab(pendingTab.id, (tab) => ({ ...tab, restoreSessionRunning: false }))
       return
     }
@@ -1917,17 +2334,19 @@ function App() {
       includeText: activeTab.searchText,
       searchOptions: activeTab.searchOptions,
       tags: activeTab.selectedTags,
-      pids: packagePids(activeTab.processes, activeTab.selectedPackages),
+      devices: activeTab.selectedSerials.length > 0 ? activeTab.selectedSerials : ['__no_device_selected__'],
+      pidDeviceKeys: packagePidDeviceKeys(activeProcesses, activeTab.selectedPackages),
     })
   }, [
-    activeTab.processes,
     activeTab.id,
     activeTab.searchOptions,
     activeTab.searchText,
     activeTab.selectedPackages,
     activeTab.selectedLevels,
+    activeTab.selectedSerials,
     activeTab.selectedTags,
     activeTab.store,
+    activeProcesses,
     resetLogWindowForTab,
   ])
 
@@ -1937,29 +2356,39 @@ function App() {
 
     Promise.all([
       listenLogcatBatch((payload) => {
-        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
-        if (!tab || tab.paused) {
+        const tab = tabsRef.current.find((item) =>
+          item.sessions.some((session) => session.sessionId === payload.sessionId),
+        )
+        const session = tab?.sessions.find((item) => item.sessionId === payload.sessionId)
+        if (!tab || !session || tab.paused) {
           return
         }
 
         tab.store.appendRawBatch({
           sessionId: payload.sessionId,
           lines: payload.lines,
-          deviceSerial: tab.session?.serial,
+          deviceSerial: session.serial,
         })
       }),
       listenLogcatError((payload) => {
-        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
+        const tab = tabsRef.current.find((item) =>
+          item.sessions.some((session) => session.sessionId === payload.sessionId),
+        )
         if (tab) {
           setLogError(payload.message)
         }
       }),
       listenLogcatStopped((payload) => {
-        const tab = tabsRef.current.find((item) => item.session?.sessionId === payload.sessionId)
+        const tab = tabsRef.current.find((item) =>
+          item.sessions.some((session) => session.sessionId === payload.sessionId),
+        )
         if (!tab) {
           return
         }
-        updateTab(tab.id, (current) => ({ ...current, session: undefined, paused: false }))
+        updateTab(tab.id, (current) => {
+          const sessions = current.sessions.filter((session) => session.sessionId !== payload.sessionId)
+          return { ...current, sessions, paused: sessions.length > 0 ? current.paused : false }
+        })
       }),
     ]).then((callbacks) => {
       if (disposed) {
@@ -1973,8 +2402,8 @@ function App() {
       disposed = true
       unlistenCallbacks.forEach((callback) => callback())
       for (const tab of tabsRef.current) {
-        if (tab.session?.sessionId) {
-          void stopLogcat(tab.session.sessionId)
+        if (tab.sessions.length) {
+          void stopLogcatSessions(tab.sessions)
         }
       }
     }
@@ -2112,48 +2541,6 @@ function App() {
         </section>
 
         <section className="sidebar-section">
-          <div className="section-heading">
-            <p className="section-label">设备</p>
-            <button
-              aria-label="刷新设备"
-              className="icon-button"
-              disabled={loadingDevices || isRunning}
-              onClick={refreshDevices}
-              title="刷新设备"
-            >
-              <RefreshCcw size={16} />
-            </button>
-          </div>
-
-          {onlineDevices.length > 0 ? (
-            onlineDevices.map((device) => (
-              <button
-                className={`device-button ${device.serial === activeTab.selectedSerial ? 'active' : ''}`}
-                disabled={isRunning}
-                key={device.serial}
-                onClick={() => {
-                  updateActiveTab((tab) => ({
-                    ...tab,
-                    selectedSerial: device.serial,
-                    selectedPackages: [],
-                    processes: [],
-                  }))
-                  void refreshProcesses(activeTab.id, device.serial)
-                }}
-              >
-                <Usb size={16} />
-                <span>
-                  <strong>{deviceTitle(device)}</strong>
-                  <small>{deviceSubtitle(device)}</small>
-                </span>
-              </button>
-            ))
-          ) : (
-            <div className="device-empty">未连接可用设备</div>
-          )}
-        </section>
-
-        <section className="sidebar-section">
           <p className="section-label">ADB</p>
           <div className={`adb-status ${adbInfo?.available ? 'available' : 'unavailable'}`}>
             {adbInfo?.available ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
@@ -2162,21 +2549,6 @@ function App() {
           {adbInfo?.path ? <code className="path-line">{adbInfo.path}</code> : null}
         </section>
 
-        <section className="sidebar-section metrics">
-          <p className="section-label">当前页面</p>
-          <div>
-            <span>缓存</span>
-            <strong>{logSnapshot.totalCount}</strong>
-          </div>
-          <div>
-            <span>筛选结果</span>
-            <strong>{logSnapshot.filteredCount}</strong>
-          </div>
-          <div>
-            <span>已淘汰</span>
-            <strong>{logSnapshot.droppedCount}</strong>
-          </div>
-        </section>
       </aside>
 
       <section className="workspace">
@@ -2234,8 +2606,8 @@ function App() {
               )}
               {detachingTabId === tab.id ? (
                 <small>分离中</small>
-              ) : tab.session?.running ? (
-                <small>{tab.paused ? '暂停' : '运行'}</small>
+              ) : tab.sessions.some((session) => session.running) ? (
+                <small>{tab.paused ? '暂停' : `运行 ${tab.sessions.length}`}</small>
               ) : null}
               {!isDetachedWindow ? (
                 <>
@@ -2277,8 +2649,19 @@ function App() {
             </button>
             <div>
               <h1>{activeTab.title}</h1>
-              <p>{selectedDevice ? deviceTitle(selectedDevice) : '等待设备连接'}</p>
+              <p>{selectedDeviceSummary(activeTab.selectedSerials, onlineDevices)}</p>
             </div>
+          </div>
+          <div className="toolbar-metrics" aria-label="日志状态">
+            <span>
+              缓存 <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
+            </span>
+            <span>
+              筛选 <strong>{logSnapshot.filteredCount.toLocaleString()}</strong>
+            </span>
+            <span>
+              淘汰 <strong>{logSnapshot.droppedCount.toLocaleString()}</strong>
+            </span>
           </div>
           <div className="toolbar-actions">
             {isDetachedWindow ? (
@@ -2287,11 +2670,11 @@ function App() {
                 {returningToMain ? '回归中' : '回归主窗'}
               </button>
             ) : null}
-            <button disabled={!selectedDevice || isStarting} onClick={handleStartPause}>
+            <button disabled={!hasSelectedDevice || isStarting} onClick={handleStartPause}>
               {isRunning && !activeTab.paused ? <Pause size={16} /> : <Play size={16} />}
               {!isRunning ? (isStarting ? '启动中' : '开始') : activeTab.paused ? '继续' : '暂停'}
             </button>
-            <button disabled={!selectedDevice || isStarting} onClick={handleRestart}>
+            <button disabled={!hasSelectedDevice || isStarting} onClick={handleRestart}>
               <RotateCcw size={16} />
               Restart
             </button>
@@ -2352,11 +2735,68 @@ function App() {
         ) : null}
 
         <div className="filter-row">
+          <div className="filter-popover-anchor" ref={deviceFilterRef}>
+            <button
+              className="filter-trigger"
+              onClick={() => {
+                setDeviceMenuOpen((open) => !open)
+                setPackageMenuOpen(false)
+                setLevelMenuOpen(false)
+                setTagMenuOpen(false)
+                setContentMenuOpen(false)
+              }}
+            >
+              <Usb size={16} />
+              {deviceFilterLabel(activeTab.selectedSerials, onlineDevices)}
+            </button>
+            {deviceMenuOpen ? (
+              <div className="filter-popover filter-popover-narrow">
+                <div className="popover-header">
+                  <strong>设备</strong>
+                  <button className="icon-button" onClick={() => setDeviceMenuOpen(false)}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="popover-actions">
+                  <span>{onlineDevices.length} 台在线设备</span>
+                  <button disabled={loadingDevices} onClick={refreshDevices}>
+                    <RefreshCcw size={16} />
+                    {loadingDevices ? '刷新中' : '刷新'}
+                  </button>
+                </div>
+                <div className="filter-option-list">
+                  {onlineDevices.length > 0 ? (
+                    onlineDevices.map((device) => {
+                      const checked = selectedSerialSet.has(device.serial)
+                      const locked = checked && activeTab.selectedSerials.length <= 1
+                      return (
+                        <button
+                          className={`filter-option ${checked ? 'selected' : ''}`}
+                          disabled={locked}
+                          key={device.serial}
+                          onClick={() => toggleDevice(device.serial)}
+                        >
+                          <input readOnly checked={checked} disabled={locked} type="checkbox" />
+                          <span>
+                            <strong>{deviceTitle(device)}</strong>
+                            <small>{deviceSubtitle(device)}</small>
+                          </span>
+                        </button>
+                      )
+                    })
+                  ) : (
+                    <div className="popover-empty">未连接可用设备</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
           <div className="filter-popover-anchor" ref={packageFilterRef}>
             <button
               className="filter-trigger"
               onClick={() => {
                 setPackageMenuOpen((open) => !open)
+                setDeviceMenuOpen(false)
                 setLevelMenuOpen(false)
                 setTagMenuOpen(false)
                 setContentMenuOpen(false)
@@ -2397,14 +2837,18 @@ function App() {
                 <div className="popover-actions">
                   <span>{packages.length} 个进程</span>
                   <button
-                    disabled={!activeTab.selectedSerial || activeTab.loadingProcesses}
-                    onClick={() => void refreshProcesses(activeTab.id, activeTab.selectedSerial)}
+                    disabled={activeTab.selectedSerials.length === 0 || loadingProcesses}
+                    onClick={() => {
+                      for (const serial of activeTab.selectedSerials) {
+                        void refreshProcesses(activeTab.id, serial)
+                      }
+                    }}
                   >
                     <RefreshCcw size={16} />
-                    {activeTab.loadingProcesses ? '读取中' : '刷新'}
+                    {loadingProcesses ? '读取中' : '刷新'}
                   </button>
                 </div>
-                {activeTab.processError ? <span className="inline-error">{activeTab.processError}</span> : null}
+                {processError ? <span className="inline-error">{processError}</span> : null}
                 <div className="filter-option-list">
                   {visiblePackages.length > 0 ? (
                     visiblePackages.map((process) => {
@@ -2422,7 +2866,10 @@ function App() {
                           />
                           <span>
                             <strong>{process.name}</strong>
-                            <small>pid {process.pid}</small>
+                            <small>
+                              pid {process.pidLabel}
+                              {process.serials.length > 1 ? ` · ${process.serials.length} 台设备` : ''}
+                            </small>
                           </span>
                         </button>
                       )
@@ -2439,6 +2886,7 @@ function App() {
               className="filter-trigger"
               onClick={() => {
                 setLevelMenuOpen((open) => !open)
+                setDeviceMenuOpen(false)
                 setPackageMenuOpen(false)
                 setTagMenuOpen(false)
                 setContentMenuOpen(false)
@@ -2481,6 +2929,7 @@ function App() {
               className="filter-trigger"
               onClick={() => {
                 setTagMenuOpen((open) => !open)
+                setDeviceMenuOpen(false)
                 setPackageMenuOpen(false)
                 setLevelMenuOpen(false)
                 setContentMenuOpen(false)
@@ -2554,13 +3003,14 @@ function App() {
               className="filter-trigger"
               onClick={() => {
                 setContentMenuOpen((open) => !open)
+                setDeviceMenuOpen(false)
                 setPackageMenuOpen(false)
                 setLevelMenuOpen(false)
                 setTagMenuOpen(false)
               }}
             >
               <Columns3 size={16} />
-              内容 {activeTab.visibleLogFields.length}/{DEFAULT_LOG_FIELDS.length}
+              内容 {activeTab.visibleLogFields.length}/{ALL_LOG_FIELDS.length}
             </button>
             {contentMenuOpen ? (
               <div className="filter-popover filter-popover-narrow">
@@ -2722,6 +3172,16 @@ function App() {
                   {visibleLogs.map((entry) => (
                     <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id}>
                       {activeTab.visibleLogFields.map((field) => {
+                        if (field === 'device') {
+                          return (
+                            <HighlightedText
+                              className="log-device"
+                              key={field}
+                              matcher={activeFindMatcher}
+                              text={deviceLabelForSerial(entry.deviceSerial, devices)}
+                            />
+                          )
+                        }
                         if (field === 'time') {
                           return (
                             <HighlightedText
