@@ -2854,6 +2854,18 @@ function App() {
   const updateProgressWidth = `${Math.max(4, Math.min(100, updateInstall.percent ?? 12))}%`
   const updateDownloadedLabel = formatBytes(updateInstall.downloadedBytes)
   const updateTotalLabel = formatBytes(updateInstall.totalBytes)
+  const updateActionIsInstall = updateCheck.status === 'available'
+  const updateActionDisabled =
+    updateChecking ||
+    updateInstalling ||
+    (updateActionIsInstall && !updateCheck.assetDownloadUrl)
+  const updateActionLabel = updateInstalling
+    ? '更新中'
+    : updateActionIsInstall
+      ? '更新'
+      : updateChecking
+        ? '检查中'
+        : '检查更新'
 
   return (
     <main className="app-shell">
@@ -2987,21 +2999,19 @@ function App() {
           ) : null}
           {updateLastChecked ? <p className="hint-text">最近检查 {updateLastChecked}</p> : null}
           <div className="utility-actions">
-            <button disabled={updateChecking || updateInstalling} onClick={() => void checkForUpdates(true)} type="button">
-              <RefreshCcw size={15} />
-              {updateChecking ? '检查中' : '检查更新'}
-            </button>
             <button
-              disabled={
-                updateInstalling ||
-                !updateCheck.assetDownloadUrl ||
-                updateCheck.status !== 'available'
-              }
-              onClick={() => void downloadUpdateAsset()}
+              disabled={updateActionDisabled}
+              onClick={() => {
+                if (updateActionIsInstall) {
+                  void downloadUpdateAsset()
+                } else {
+                  void checkForUpdates(true)
+                }
+              }}
               type="button"
             >
-              <Download size={15} />
-              {updateInstalling ? '更新中' : '更新'}
+              {updateActionIsInstall || updateInstalling ? <Download size={15} /> : <RefreshCcw size={15} />}
+              {updateActionLabel}
             </button>
             <button disabled={updateInstalling} onClick={() => void openReleasePage()} type="button">
               <ExternalLink size={15} />
