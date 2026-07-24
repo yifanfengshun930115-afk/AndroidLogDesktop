@@ -3,7 +3,9 @@ import {
   ArrowDownToLine,
   ArrowUpToLine,
   CaseSensitive,
+  Check,
   CheckCircle2,
+  ChevronDown,
   Columns3,
   Download,
   ExternalLink,
@@ -36,6 +38,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -750,6 +753,7 @@ function App() {
   const [tagMenuOpen, setTagMenuOpen] = useState(false)
   const [tagSearch, setTagSearch] = useState('')
   const [contentMenuOpen, setContentMenuOpen] = useState(false)
+  const [logSchemeMenuOpen, setLogSchemeMenuOpen] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(initialAppState.theme)
   const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>(initialAppState.logColorScheme)
   const [logFontSize, setLogFontSize] = useState(initialAppState.logFontSize)
@@ -763,6 +767,7 @@ function App() {
   const [findBarOpen, setFindBarOpen] = useState(initialAppState.findBarOpen)
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
   const [closingApp, setClosingApp] = useState(false)
+  const [logWindowStarts, setLogWindowStarts] = useState<Record<string, number>>({})
   const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
@@ -773,6 +778,9 @@ function App() {
   const tabTitleInputRef = useRef<HTMLInputElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
   const logListRef = useRef<HTMLDivElement>(null)
+  const logScrollTopByTabRef = useRef<Record<string, number>>({})
+  const pendingLogScrollRef = useRef<'top' | 'bottom'>()
+  const logSchemeSelectRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
   const tagFilterRef = useRef<HTMLDivElement>(null)
@@ -888,7 +896,8 @@ function App() {
   const selectedDevice = onlineDevices.find((device) => device.serial === activeTab.selectedSerial)
   const isRunning = Boolean(activeTab.session?.running)
   const isStarting = startingTabId === activeTab.id
-  const visibleLogs = logSnapshot.visibleEntries
+  const activeLogWindowStart = logWindowStarts[activeTabId] ?? 0
+  const visibleLogs = activeStore.getVisibleEntriesWindow(activeLogWindowStart)
   const packages = packageOptions(activeTab.processes)
   const visiblePackages = filterPackageOptions(activeTab.processes, packageSearch)
   const visibleTags = filterTextOptions(logSnapshot.tagOptions, tagSearch)
@@ -910,6 +919,83 @@ function App() {
       }) as CSSProperties,
     [activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
   )
+
+  const setActiveLogWindowStart = useCallback(
+    (startIndex: number) => {
+      const safeStart = Math.max(0, Math.floor(startIndex))
+      setLogWindowStarts((current) =>
+        current[activeTabId] === safeStart ? current : { ...current, [activeTabId]: safeStart },
+      )
+    },
+    [activeTabId],
+  )
+
+  const resetLogWindowForTab = useCallback(
+    (tabId: string) => {
+      logScrollTopByTabRef.current[tabId] = 0
+      setLogWindowStarts((current) => (current[tabId] === 0 ? current : { ...current, [tabId]: 0 }))
+      if (tabId === activeTabId) {
+        pendingLogScrollRef.current = 'top'
+      }
+    },
+    [activeTabId],
+  )
+
+  const applyPendingLogScroll = useCallback(() => {
+    const scrollFrame = logListRef.current
+    const target = pendingLogScrollRef.current
+    if (!scrollFrame || !target) {
+      return false
+    }
+
+    const nextTop = target === 'bottom' ? scrollFrame.scrollHeight : 0
+    scrollFrame.scrollTop = nextTop
+    logScrollTopByTabRef.current[activeTabId] = nextTop
+    pendingLogScrollRef.current = undefined
+    return true
+  }, [activeTabId])
+
+  const handleLogScroll = useCallback(() => {
+    if (logListRef.current) {
+      logScrollTopByTabRef.current[activeTabId] = logListRef.current.scrollTop
+    }
+  }, [activeTabId])
+
+  const scrollLogToTop = useCallback(() => {
+    const scrollFrame = logListRef.current
+    if (!scrollFrame) {
+      return
+    }
+    pendingLogScrollRef.current = 'top'
+    setActiveLogWindowStart(0)
+    logScrollTopByTabRef.current[activeTabId] = 0
+    scrollFrame.scrollTo({ top: 0, behavior: 'smooth' })
+    window.requestAnimationFrame(() => {
+      applyPendingLogScroll()
+    })
+  }, [activeTabId, applyPendingLogScroll, setActiveLogWindowStart])
+
+  const scrollLogToBottom = useCallback(() => {
+    const scrollFrame = logListRef.current
+    if (!scrollFrame) {
+      return
+    }
+    const startIndex = Math.max(0, logSnapshot.filteredCount - logSnapshot.displayLimit)
+    pendingLogScrollRef.current = 'bottom'
+    setActiveLogWindowStart(startIndex)
+    const top = scrollFrame.scrollHeight
+    logScrollTopByTabRef.current[activeTabId] = top
+    scrollFrame.scrollTo({ top, behavior: 'smooth' })
+    window.requestAnimationFrame(() => {
+      applyPendingLogScroll()
+    })
+  }, [
+    activeTabId,
+    applyPendingLogScroll,
+    logSnapshot.displayLimit,
+    logSnapshot.filteredCount,
+    setActiveLogWindowStart,
+  ])
 
   useEffect(() => {
     return () => {
@@ -941,7 +1027,24 @@ function App() {
     window.requestAnimationFrame(() => findInputRef.current?.focus())
   }, [activeTabId, findBarOpen])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const scrollFrame = logListRef.current
+    if (!scrollFrame) {
+      return
+    }
+    if (applyPendingLogScroll()) {
+      return
+    }
+
+    const maxTop = Math.max(0, scrollFrame.scrollHeight - scrollFrame.clientHeight)
+    const nextTop = Math.min(logScrollTopByTabRef.current[activeTabId] ?? 0, maxTop)
+    if (scrollFrame.scrollTop !== nextTop) {
+      scrollFrame.scrollTop = nextTop
+    }
+    logScrollTopByTabRef.current[activeTabId] = nextTop
+  }, [activeLogWindowStart, activeTabId, applyPendingLogScroll, logSnapshot.version])
+
+  useLayoutEffect(() => {
     if (logListRef.current) {
       logListRef.current.scrollLeft = 0
     }
@@ -1031,12 +1134,13 @@ function App() {
     setTagMenuOpen(false)
     setTagSearch('')
     setContentMenuOpen(false)
+    setLogSchemeMenuOpen(false)
     setEditingTabId('')
     setEditingTabTitle('')
   }, [activeTabId])
 
   useEffect(() => {
-    if (!packageMenuOpen && !levelMenuOpen && !tagMenuOpen && !contentMenuOpen) {
+    if (!packageMenuOpen && !levelMenuOpen && !tagMenuOpen && !contentMenuOpen && !logSchemeMenuOpen) {
       return undefined
     }
 
@@ -1050,15 +1154,20 @@ function App() {
     }
     const closeLevelMenu = () => setLevelMenuOpen(false)
     const closeContentMenu = () => setContentMenuOpen(false)
+    const closeLogSchemeMenu = () => setLogSchemeMenuOpen(false)
     const handlePointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Node)) {
         return
       }
 
+      const clickedLogSchemeSelect = logSchemeSelectRef.current?.contains(event.target) ?? false
       const clickedPackageFilter = packageFilterRef.current?.contains(event.target) ?? false
       const clickedLevelFilter = levelFilterRef.current?.contains(event.target) ?? false
       const clickedTagFilter = tagFilterRef.current?.contains(event.target) ?? false
       const clickedContentFilter = contentFilterRef.current?.contains(event.target) ?? false
+      if (logSchemeMenuOpen && !clickedLogSchemeSelect) {
+        closeLogSchemeMenu()
+      }
       if (packageMenuOpen && !clickedPackageFilter) {
         closePackageMenu()
       }
@@ -1074,6 +1183,7 @@ function App() {
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        closeLogSchemeMenu()
         closePackageMenu()
         closeLevelMenu()
         closeTagMenu()
@@ -1087,7 +1197,7 @@ function App() {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [contentMenuOpen, levelMenuOpen, packageMenuOpen, tagMenuOpen])
+  }, [contentMenuOpen, levelMenuOpen, logSchemeMenuOpen, packageMenuOpen, tagMenuOpen])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
@@ -1219,6 +1329,7 @@ function App() {
         await stopLogcat(tab.session.sessionId)
       }
       if (clearBeforeStart) {
+        resetLogWindowForTab(tabId)
         tab.store.clear()
       }
 
@@ -1244,7 +1355,7 @@ function App() {
         setStartingTabId('')
       }
     },
-    [updateTab],
+    [resetLogWindowForTab, updateTab],
   )
 
   const handleStartPause = useCallback(() => {
@@ -1258,6 +1369,11 @@ function App() {
   const handleRestart = useCallback(() => {
     void startTabLogcat(activeTab.id, true)
   }, [activeTab.id, startTabLogcat])
+
+  const handleClearLogs = useCallback(() => {
+    resetLogWindowForTab(activeTab.id)
+    activeTab.store.clear()
+  }, [activeTab.id, activeTab.store, resetLogWindowForTab])
 
   const handleExportLogs = useCallback(async () => {
     setIsExporting(true)
@@ -1689,6 +1805,7 @@ function App() {
   }, [startingTabId, startTabLogcat, tabs, updateTab])
 
   useEffect(() => {
+    resetLogWindowForTab(activeTab.id)
     activeTab.store.setQuery({
       levels: activeTab.selectedLevels,
       includeText: activeTab.searchText,
@@ -1698,12 +1815,14 @@ function App() {
     })
   }, [
     activeTab.processes,
+    activeTab.id,
     activeTab.searchOptions,
     activeTab.searchText,
     activeTab.selectedPackages,
     activeTab.selectedLevels,
     activeTab.selectedTags,
     activeTab.store,
+    resetLogWindowForTab,
   ])
 
   useEffect(() => {
@@ -1805,17 +1924,41 @@ function App() {
             {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
             {theme === 'light' ? '切换暗色' : '切换亮色'}
           </button>
-          <select
-            className="theme-select"
-            onChange={(event) => setLogColorScheme(event.target.value as LogColorScheme)}
-            value={logColorScheme}
-          >
-            {Object.entries(LOG_COLOR_SCHEME_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                日志配色：{label}
-              </option>
-            ))}
-          </select>
+          <div className="theme-select-control" ref={logSchemeSelectRef}>
+            <button
+              aria-expanded={logSchemeMenuOpen}
+              className={`theme-select-trigger ${logSchemeMenuOpen ? 'open' : ''}`}
+              onClick={() => setLogSchemeMenuOpen((open) => !open)}
+              type="button"
+            >
+              <span>日志配色</span>
+              <strong>{LOG_COLOR_SCHEME_LABELS[logColorScheme]}</strong>
+              <ChevronDown className="theme-select-chevron" size={16} />
+            </button>
+            {logSchemeMenuOpen ? (
+              <div className="theme-select-menu" role="listbox">
+                {Object.entries(LOG_COLOR_SCHEME_LABELS).map(([value, label]) => {
+                  const selected = value === logColorScheme
+                  return (
+                    <button
+                      aria-selected={selected}
+                      className={`theme-select-option ${selected ? 'selected' : ''}`}
+                      key={value}
+                      onClick={() => {
+                        setLogColorScheme(value as LogColorScheme)
+                        setLogSchemeMenuOpen(false)
+                      }}
+                      role="option"
+                      type="button"
+                    >
+                      <span className="theme-select-check">{selected ? <Check size={16} /> : null}</span>
+                      日志配色：{label}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
           <label className="preference-control">
             <span className="preference-heading">
               <span>日志字号</span>
@@ -2046,22 +2189,15 @@ function App() {
               <RotateCcw size={16} />
               Restart
             </button>
-            <button disabled={logSnapshot.totalCount === 0} onClick={() => activeTab.store.clear()}>
+            <button disabled={logSnapshot.totalCount === 0} onClick={handleClearLogs}>
               <Trash2 size={16} />
               清理
             </button>
-            <button onClick={() => logListRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}>
+            <button onClick={scrollLogToTop}>
               <ArrowUpToLine size={16} />
               滚顶
             </button>
-            <button
-              onClick={() =>
-                logListRef.current?.scrollTo({
-                  top: logListRef.current.scrollHeight,
-                  behavior: 'smooth',
-                })
-              }
-            >
+            <button onClick={scrollLogToBottom}>
               <ArrowDownToLine size={16} />
               滚底
             </button>
@@ -2457,7 +2593,7 @@ function App() {
           className={`log-panel ${activeTab.softWrap ? 'soft-wrap' : 'no-soft-wrap'}`}
           style={logLayoutStyle}
         >
-          <div className="log-scroll-frame" ref={logListRef}>
+          <div className="log-scroll-frame" onScroll={handleLogScroll} ref={logListRef}>
             <div className="log-table">
               <div className="log-header">
                 {activeTab.visibleLogFields.map((field) => (

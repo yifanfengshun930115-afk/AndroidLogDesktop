@@ -397,6 +397,18 @@ export class LogStore {
       .filter((entry): entry is LogEntry => Boolean(entry))
   }
 
+  getVisibleEntriesWindow(startIndex = 0, limit = this.displayLimit) {
+    this.trimStaleFilteredSequences()
+    const safeLimit = Math.max(1, Math.min(this.displayLimit, Math.floor(limit)))
+    const maxStart = Math.max(0, this.filteredSequences.length - safeLimit)
+    const safeStart = Math.max(0, Math.min(Math.floor(startIndex), maxStart))
+
+    return this.filteredSequences
+      .slice(safeStart, safeStart + safeLimit)
+      .map((sequence) => this.getBySequence(sequence))
+      .filter((entry): entry is LogEntry => Boolean(entry))
+  }
+
   getExportContent() {
     const entries = this.getFilteredEntries()
     return entries.length === 0 ? '' : `${entries.map((entry) => entry.raw).join('\n')}\n`

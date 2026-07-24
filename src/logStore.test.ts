@@ -38,6 +38,17 @@ describe('LogStore', () => {
     expect(snapshot.visibleEntries.map((entry) => entry.sequence)).toEqual([2, 3, 4])
   })
 
+  it('reads a stable visible window by filtered index', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 3 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+    expect(store.getVisibleEntriesWindow(0).map((entry) => entry.sequence)).toEqual([1, 2, 3])
+
+    store.appendRawBatch({ sessionId: 's1', lines: lines.slice(0, 1) })
+    expect(store.getVisibleEntriesWindow(0).map((entry) => entry.sequence)).toEqual([1, 2, 3])
+    expect(store.getVisibleEntriesWindow(2).map((entry) => entry.sequence)).toEqual([3, 4, 5])
+  })
+
   it('maintains an incremental filtered sequence list for active filters', () => {
     const store = new LogStore({ capacity: 10, displayLimit: 10 })
 
