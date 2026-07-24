@@ -1369,10 +1369,13 @@
 .log-message {
   color: var(--color-text-soft);
   cursor: text;
+}
+
+.log-row > .log-message {
   user-select: text;
 }
 
-.log-message * {
+.log-row > .log-message * {
   user-select: text;
 }
 
