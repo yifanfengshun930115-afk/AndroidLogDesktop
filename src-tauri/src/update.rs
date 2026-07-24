@@ -1,17 +1,25 @@
+use crate::logcat;
 use serde::Serialize;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::{
     collections::HashSet,
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    env, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::{AppHandle, Emitter, Manager};
 
 const RELEASE_REPO_URL: &str = "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop";
 const RELEASE_LATEST_URL: &str =
     "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/latest";
 const RELEASE_DOWNLOAD_PATH_PREFIX: &str =
     "/yifanfengshun930115-afk/AndroidLogDesktop/releases/download/";
+const UPDATE_INSTALL_PROGRESS_EVENT: &str = "update://install-progress";
+const UPDATE_PROGRESS_INTERVAL_MS: u64 = 120;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -48,8 +56,41 @@ pub struct ExternalOpenResult {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallResult {
+    ok: bool,
+    message: String,
+    file_path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallProgress {
+    stage: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<f64>,
+    message: String,
+    file_path: Option<String>,
+}
+
+struct DownloadedUpdateAsset {
+    file_path: PathBuf,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
 #[tauri::command]
-pub fn check_for_updates() -> UpdateCheckResult {
+pub async fn check_for_updates() -> UpdateCheckResult {
+    match tauri::async_runtime::spawn_blocking(build_update_check_result).await {
+        Ok(result) => result,
+        Err(error) => update_check_error(format!("更新检查任务异常：{error}")),
+    }
+}
+
+fn build_update_check_result() -> UpdateCheckResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let checked_at_epoch_ms = now_ms();
 
@@ -60,7 +101,7 @@ pub fn check_for_updates() -> UpdateCheckResult {
             let has_update = version_order > 0;
             let message = if has_update {
                 if let Some(asset) = &asset {
-                    format!("可下载适配当前系统的安装包：{}。", asset.name)
+                    format!("可更新到适配当前系统的安装包：{}。", asset.name)
                 } else {
                     "发现新版本，但没有找到适配当前系统的安装包。".to_string()
                 }
@@ -89,19 +130,94 @@ pub fn check_for_updates() -> UpdateCheckResult {
                 error: None,
             }
         }
-        Err(error) => UpdateCheckResult {
-            ok: false,
-            current_version,
-            latest_version: None,
-            has_update: false,
-            release_url: RELEASE_LATEST_URL.to_string(),
-            asset_name: None,
-            asset_download_url: None,
-            asset_size_bytes: None,
-            checked_at_epoch_ms,
-            message: "更新检查失败。".to_string(),
-            error: Some(error),
-        },
+        Err(error) => update_check_error_with_version(current_version, checked_at_epoch_ms, error),
+    }
+}
+
+fn update_check_error(error: String) -> UpdateCheckResult {
+    update_check_error_with_version(env!("CARGO_PKG_VERSION").to_string(), now_ms(), error)
+}
+
+fn update_check_error_with_version(
+    current_version: String,
+    checked_at_epoch_ms: u64,
+    error: String,
+) -> UpdateCheckResult {
+    UpdateCheckResult {
+        ok: false,
+        current_version,
+        latest_version: None,
+        has_update: false,
+        release_url: RELEASE_LATEST_URL.to_string(),
+        asset_name: None,
+        asset_download_url: None,
+        asset_size_bytes: None,
+        checked_at_epoch_ms,
+        message: "更新检查失败。".to_string(),
+        error: Some(error),
+    }
+}
+
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    download_url: String,
+    asset_name: Option<String>,
+) -> UpdateInstallResult {
+    let trimmed_url = download_url.trim().to_string();
+    if !is_allowed_release_download_url(&trimmed_url) {
+        return update_install_error("只允许下载当前项目 GitHub Release 的安装包。".to_string());
+    }
+
+    let app_for_download = app.clone();
+    let download_result = tauri::async_runtime::spawn_blocking(move || {
+        download_update_asset(&app_for_download, &trimmed_url, asset_name)
+    })
+    .await;
+
+    let update_asset = match download_result {
+        Ok(Ok(asset)) => asset,
+        Ok(Err(error)) => return update_install_error(error),
+        Err(error) => return update_install_error(format!("更新下载任务异常：{error}")),
+    };
+    let file_path = update_asset.file_path;
+
+    emit_update_progress(
+        &app,
+        "installing",
+        update_asset.downloaded_bytes,
+        update_asset.total_bytes,
+        Some(100.0),
+        "安装程序已准备好，应用即将退出并开始安装。",
+        Some(&file_path),
+    );
+
+    if let Err(error) = launch_update_installer(&file_path) {
+        return update_install_error(error);
+    }
+
+    let logcat_state = app.state::<logcat::LogcatState>();
+    let _ = logcat::stop_all_logcat_processes(&logcat_state);
+    let app_for_exit = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(700));
+        app_for_exit.exit(0);
+    });
+
+    UpdateInstallResult {
+        ok: true,
+        message: "安装程序已启动。".to_string(),
+        file_path: Some(file_path.to_string_lossy().to_string()),
+        error: None,
+    }
+}
+
+fn update_install_error(error: String) -> UpdateInstallResult {
+    UpdateInstallResult {
+        ok: false,
+        message: "更新失败。".to_string(),
+        file_path: None,
+        error: Some(error),
     }
 }
 
@@ -213,6 +329,326 @@ fn fetch_text(url: &str) -> Result<(String, String), String> {
     } else {
         Ok((url.to_string(), stdout))
     }
+}
+
+fn download_update_asset(
+    app: &AppHandle,
+    download_url: &str,
+    asset_name: Option<String>,
+) -> Result<DownloadedUpdateAsset, String> {
+    let file_name = update_download_file_name(download_url, asset_name.as_deref())?;
+    let update_dir = env::temp_dir().join("android-log-desktop-updates");
+    fs::create_dir_all(&update_dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
+    let destination = update_dir.join(file_name);
+    let partial_destination = destination.with_extension("download");
+    let _ = fs::remove_file(&partial_destination);
+
+    emit_update_progress(
+        app,
+        "downloading",
+        0,
+        None,
+        Some(0.0),
+        "正在连接 GitHub Release。",
+        Some(&destination),
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("AndroidLogDesktop/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建下载客户端失败：{error}"))?;
+
+    let mut response = client
+        .get(download_url)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .map_err(|error| format!("下载安装包失败：{error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("下载安装包失败，HTTP 状态码 {status}。"));
+    }
+
+    let total_bytes = response.content_length();
+    let mut file = fs::File::create(&partial_destination)
+        .map_err(|error| format!("创建安装包文件失败：{error}"))?;
+    let mut downloaded_bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut last_progress = Instant::now();
+
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("读取下载数据失败：{error}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("写入安装包失败：{error}"))?;
+        downloaded_bytes += read as u64;
+
+        if last_progress.elapsed() >= Duration::from_millis(UPDATE_PROGRESS_INTERVAL_MS) {
+            emit_download_progress(app, downloaded_bytes, total_bytes, Some(&destination));
+            last_progress = Instant::now();
+        }
+    }
+
+    file.flush()
+        .map_err(|error| format!("写入安装包失败：{error}"))?;
+    fs::rename(&partial_destination, &destination)
+        .map_err(|error| format!("保存安装包失败：{error}"))?;
+
+    emit_update_progress(
+        app,
+        "downloaded",
+        downloaded_bytes,
+        total_bytes.or(Some(downloaded_bytes)),
+        Some(100.0),
+        "安装包下载完成。",
+        Some(&destination),
+    );
+
+    Ok(DownloadedUpdateAsset {
+        file_path: destination,
+        downloaded_bytes,
+        total_bytes: total_bytes.or(Some(downloaded_bytes)),
+    })
+}
+
+fn emit_download_progress(
+    app: &AppHandle,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    file_path: Option<&Path>,
+) {
+    let percent = total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| (downloaded_bytes as f64 / total as f64 * 100.0).min(99.0));
+    emit_update_progress(
+        app,
+        "downloading",
+        downloaded_bytes,
+        total_bytes,
+        percent,
+        "正在下载安装包。",
+        file_path,
+    );
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<f64>,
+    message: &str,
+    file_path: Option<&Path>,
+) {
+    let _ = app.emit(
+        UPDATE_INSTALL_PROGRESS_EVENT,
+        UpdateInstallProgress {
+            stage: stage.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            percent,
+            message: message.to_string(),
+            file_path: file_path.map(|path| path.to_string_lossy().to_string()),
+        },
+    );
+}
+
+fn update_download_file_name(
+    download_url: &str,
+    asset_name: Option<&str>,
+) -> Result<String, String> {
+    let candidate = asset_name
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| name.trim().to_string())
+        .or_else(|| {
+            download_url
+                .split(['?', '#'])
+                .next()
+                .and_then(|clean_url| clean_url.rsplit('/').next())
+                .map(percent_decode)
+        })
+        .ok_or_else(|| "无法解析安装包文件名。".to_string())?;
+
+    let sanitized = sanitize_file_name(&candidate);
+    if sanitized.is_empty() {
+        Err("安装包文件名无效。".to_string())
+    } else {
+        Ok(sanitized)
+    }
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(*character, '.' | '-' | '_' | ' ' | '(' | ')')
+        })
+        .collect::<String>()
+        .trim_matches(['.', ' '])
+        .to_string()
+}
+
+fn launch_update_installer(file_path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        launch_macos_update_installer(file_path)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        launch_windows_update_installer(file_path)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        launch_linux_update_installer(file_path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launch_macos_update_installer(file_path: &Path) -> Result<(), String> {
+    let extension = file_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension != "dmg" {
+        return open_path(file_path);
+    }
+
+    let app_path = current_app_bundle_path()
+        .unwrap_or_else(|| PathBuf::from("/Applications/Android Log Desktop.app"));
+    let script_path = file_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/tmp"))
+        .join(format!(
+            "install-android-log-desktop-{}.sh",
+            std::process::id()
+        ));
+    let script = macos_install_script(file_path, &app_path);
+    fs::write(&script_path, script).map_err(|error| format!("创建安装脚本失败：{error}"))?;
+    let mut command = Command::new("sh");
+    command
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动安装脚本失败：{error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn current_app_bundle_path() -> Option<PathBuf> {
+    let mut path = env::current_exe().ok()?;
+    while path.pop() {
+        if path.extension().and_then(|value| value.to_str()) == Some("app") {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_install_script(dmg_path: &Path, app_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+set -eu
+DMG_PATH={dmg_path}
+APP_PATH={app_path}
+MOUNT_DIR="$(mktemp -d "${{TMPDIR:-/tmp/}}android-log-desktop-update.XXXXXX")"
+cleanup() {{
+  hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+  rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+}}
+trap cleanup EXIT
+hdiutil attach -nobrowse -quiet -readonly -mountpoint "$MOUNT_DIR" "$DMG_PATH"
+SOURCE_APP="$(find "$MOUNT_DIR" -maxdepth 1 -name '*.app' -type d | head -n 1)"
+if [ -z "$SOURCE_APP" ]; then
+  exit 1
+fi
+while pgrep -x android-log-desktop >/dev/null 2>&1; do
+  sleep 0.3
+done
+ditto "$SOURCE_APP" "$APP_PATH"
+open "$APP_PATH"
+"#,
+        dmg_path = shell_single_quote(&dmg_path.to_string_lossy()),
+        app_path = shell_single_quote(&app_path.to_string_lossy()),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn launch_windows_update_installer(file_path: &Path) -> Result<(), String> {
+    let mut command = hidden_command(&file_path.to_string_lossy());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动 Windows 安装程序失败：{error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn launch_linux_update_installer(file_path: &Path) -> Result<(), String> {
+    let extension = file_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "appimage" {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(file_path)
+                .map_err(|error| format!("读取 AppImage 权限失败：{error}"))?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(file_path, permissions)
+                .map_err(|error| format!("设置 AppImage 可执行权限失败：{error}"))?;
+        }
+    }
+    open_path(file_path)
+}
+
+fn open_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn extract_release_tag_from_url(url: &str) -> Option<String> {
@@ -406,6 +842,10 @@ fn is_allowed_release_url(url: &str) -> bool {
     url == RELEASE_REPO_URL || url.starts_with(&format!("{}/releases/", RELEASE_REPO_URL))
 }
 
+fn is_allowed_release_download_url(url: &str) -> bool {
+    url.starts_with(&format!("{}/releases/download/", RELEASE_REPO_URL))
+}
+
 fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -542,5 +982,38 @@ mod tests {
             "https://github.com/other/repo/releases/latest"
         ));
         assert!(!is_allowed_release_url("https://example.com/app.dmg"));
+    }
+
+    #[test]
+    fn release_download_allowlist_requires_project_asset_url() {
+        assert!(is_allowed_release_download_url(
+            "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/download/v0.1.2/app.dmg"
+        ));
+        assert!(!is_allowed_release_download_url(
+            "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/latest"
+        ));
+        assert!(!is_allowed_release_download_url(
+            "https://github.com/other/repo/releases/download/v0.1.2/app.dmg"
+        ));
+    }
+
+    #[test]
+    fn update_download_file_name_prefers_safe_asset_name() {
+        assert_eq!(
+            update_download_file_name(
+                "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/download/v0.1.2/fallback.dmg",
+                Some("../Android Log Desktop_0.1.2_aarch64.dmg")
+            )
+            .as_deref(),
+            Ok("Android Log Desktop_0.1.2_aarch64.dmg")
+        );
+        assert_eq!(
+            update_download_file_name(
+                "https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/download/v0.1.2/Android%20Log%20Desktop_0.1.2_aarch64.dmg",
+                None
+            )
+            .as_deref(),
+            Ok("Android Log Desktop_0.1.2_aarch64.dmg")
+        );
     }
 }

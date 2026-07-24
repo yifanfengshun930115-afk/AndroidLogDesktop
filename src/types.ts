@@ -95,3 +95,21 @@ export interface ExternalOpenResult {
   message: string
   error?: string
 }
+
+export type UpdateInstallStage = 'downloading' | 'downloaded' | 'installing'
+
+export interface UpdateInstallProgress {
+  stage: UpdateInstallStage
+  downloadedBytes: number
+  totalBytes?: number
+  percent?: number
+  message: string
+  filePath?: string
+}
+
+export interface UpdateInstallResult {
+  ok: boolean
+  message: string
+  filePath?: string
+  error?: string
+}

@@ -57,7 +57,12 @@ import {
   stopLogcat,
 } from './api/logcat'
 import { clearTabTransfer, putTabTransfer, takeTabTransfer } from './api/tabTransfer'
-import { checkForUpdates as checkForAppUpdatesCommand, openExternalUrl } from './api/update'
+import {
+  checkForUpdates as checkForAppUpdatesCommand,
+  installUpdate,
+  listenUpdateInstallProgress,
+  openExternalUrl,
+} from './api/update'
 import appIconUrl from '../src-tauri/icons/128x128.png'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
@@ -78,6 +83,8 @@ import type {
   LogLevel,
   LogcatSessionInfo,
   UpdateCheckResult,
+  UpdateInstallProgress,
+  UpdateInstallResult,
 } from './types'
 
 interface LogTab {
@@ -167,6 +174,7 @@ interface ToastMessage {
 }
 
 type UpdateCheckStatus = 'idle' | 'checking' | 'current' | 'available' | 'error'
+type UpdateInstallStatus = 'idle' | 'downloading' | 'installing' | 'error'
 
 interface UpdateCheckState {
   status: UpdateCheckStatus
@@ -178,6 +186,16 @@ interface UpdateCheckState {
   assetSizeBytes?: number
   checkedAtEpochMs?: number
   message: string
+}
+
+interface UpdateInstallState {
+  open: boolean
+  status: UpdateInstallStatus
+  message: string
+  downloadedBytes: number
+  totalBytes?: number
+  percent?: number
+  filePath?: string
 }
 
 interface CellCopyMenu {
@@ -992,6 +1010,13 @@ function formatBytes(sizeBytes?: number) {
   return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`
 }
 
+function formatPercent(percent?: number) {
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) {
+    return undefined
+  }
+  return `${Math.max(0, Math.min(100, percent)).toFixed(0)}%`
+}
+
 function formatCheckedTime(epochMs?: number) {
   if (!epochMs) {
     return ''
@@ -1179,6 +1204,12 @@ function App() {
     status: 'idle',
     releaseUrl: RELEASE_PAGE_URL,
     message: '启动后会自动检查 GitHub Release。',
+  })
+  const [updateInstall, setUpdateInstall] = useState<UpdateInstallState>({
+    open: false,
+    status: 'idle',
+    message: '',
+    downloadedBytes: 0,
   })
   const [cellCopyMenu, setCellCopyMenu] = useState<CellCopyMenu>()
   const [drawerOpen, setDrawerOpen] = useState(initialAppState.drawerOpen)
@@ -1890,6 +1921,18 @@ function App() {
     [showToast],
   )
 
+  const applyUpdateInstallProgress = useCallback((progress: UpdateInstallProgress) => {
+    setUpdateInstall((current) => ({
+      open: true,
+      status: progress.stage === 'installing' ? 'installing' : 'downloading',
+      message: progress.message,
+      downloadedBytes: progress.downloadedBytes,
+      totalBytes: progress.totalBytes ?? current.totalBytes,
+      percent: progress.percent ?? current.percent,
+      filePath: progress.filePath ?? current.filePath,
+    }))
+  }, [])
+
   const openUpdateUrl = useCallback(
     async (url: string | undefined, successTitle: string) => {
       if (!url) {
@@ -1931,8 +1974,60 @@ function App() {
       })
       return
     }
-    await openUpdateUrl(updateCheck.assetDownloadUrl, '已打开安装包下载链接')
-  }, [openUpdateUrl, showToast, updateCheck.assetDownloadUrl])
+
+    setUpdateInstall({
+      open: true,
+      status: 'downloading',
+      message: '准备下载安装包。',
+      downloadedBytes: 0,
+      totalBytes: updateCheck.assetSizeBytes,
+      percent: 0,
+      filePath: undefined,
+    })
+
+    try {
+      const result: UpdateInstallResult = await installUpdate(
+        updateCheck.assetDownloadUrl,
+        updateCheck.assetName,
+      )
+      if (!result.ok) {
+        throw new Error(result.error ?? result.message)
+      }
+
+      setUpdateInstall((current) => ({
+        ...current,
+        open: true,
+        status: 'installing',
+        message: result.message,
+        percent: 100,
+        filePath: result.filePath ?? current.filePath,
+      }))
+      showToast({
+        id: Date.now(),
+        tone: 'success',
+        title: '安装程序已启动',
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setUpdateInstall((current) => ({
+        ...current,
+        open: true,
+        status: 'error',
+        message,
+      }))
+      showToast({
+        id: Date.now(),
+        tone: 'danger',
+        title: '更新失败',
+        message,
+      })
+    }
+  }, [
+    showToast,
+    updateCheck.assetDownloadUrl,
+    updateCheck.assetName,
+    updateCheck.assetSizeBytes,
+  ])
 
   const openReleasePage = useCallback(async () => {
     await openUpdateUrl(updateCheck.releaseUrl ?? RELEASE_PAGE_URL, '已打开 Release 页面')
@@ -2593,6 +2688,24 @@ function App() {
   }, [checkForUpdates, isDetachedWindow])
 
   useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    listenUpdateInstallProgress(applyUpdateInstallProgress).then((callback) => {
+      if (disposed) {
+        callback()
+        return
+      }
+      unlisten = callback
+    })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [applyUpdateInstallProgress])
+
+  useEffect(() => {
     for (const serial of activeTab.selectedSerials) {
       if (!activeTab.processesBySerial[serial] && !activeTab.loadingProcessesBySerial[serial]) {
         void refreshProcesses(activeTab.id, serial)
@@ -2735,7 +2848,12 @@ function App() {
   }, [updateTab])
 
   const updateChecking = updateCheck.status === 'checking'
+  const updateInstalling = updateInstall.status === 'downloading' || updateInstall.status === 'installing'
   const updateLastChecked = formatCheckedTime(updateCheck.checkedAtEpochMs)
+  const updatePercentLabel = formatPercent(updateInstall.percent)
+  const updateProgressWidth = `${Math.max(4, Math.min(100, updateInstall.percent ?? 12))}%`
+  const updateDownloadedLabel = formatBytes(updateInstall.downloadedBytes)
+  const updateTotalLabel = formatBytes(updateInstall.totalBytes)
 
   return (
     <main className="app-shell">
@@ -2762,6 +2880,70 @@ function App() {
                 取消
               </button>
             </div>
+          </section>
+        </div>
+      ) : null}
+      {updateInstall.open ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
+            <div className="update-dialog-header">
+              <div>
+                <h2 id="update-dialog-title">
+                  {updateInstall.status === 'error' ? '更新失败' : '正在更新 Android Log Desktop'}
+                </h2>
+                <p>{updateInstall.message}</p>
+              </div>
+              {updateInstall.status === 'error' ? (
+                <button
+                  className="icon-button"
+                  onClick={() => setUpdateInstall((current) => ({ ...current, open: false }))}
+                  type="button"
+                >
+                  <X size={16} />
+                </button>
+              ) : null}
+            </div>
+            <div
+              className="update-progress-track"
+              role="progressbar"
+              aria-valuemax={100}
+              aria-valuemin={0}
+              aria-valuenow={
+                typeof updateInstall.percent === 'number' ? Math.round(updateInstall.percent) : undefined
+              }
+            >
+              <span
+                className={updatePercentLabel ? undefined : 'indeterminate'}
+                style={{ width: updateProgressWidth }}
+              />
+            </div>
+            <div className="update-progress-meta">
+              <span>
+                {updateDownloadedLabel}
+                {updateTotalLabel ? ` / ${updateTotalLabel}` : ''}
+              </span>
+              <strong>{updatePercentLabel ?? '下载中'}</strong>
+            </div>
+            {updateInstall.filePath ? (
+              <p className="update-file-path" title={updateInstall.filePath}>
+                {updateInstall.filePath}
+              </p>
+            ) : null}
+            {updateInstall.status === 'error' ? (
+              <div className="confirm-actions">
+                <button
+                  onClick={() => setUpdateInstall((current) => ({ ...current, open: false }))}
+                  type="button"
+                >
+                  关闭
+                </button>
+                <button onClick={() => void openReleasePage()} type="button">
+                  打开 Release 页面
+                </button>
+              </div>
+            ) : (
+              <p className="hint-text">下载完成后会自动启动安装流程，安装前会停止正在运行的 logcat。</p>
+            )}
           </section>
         </div>
       ) : null}
@@ -2805,19 +2987,23 @@ function App() {
           ) : null}
           {updateLastChecked ? <p className="hint-text">最近检查 {updateLastChecked}</p> : null}
           <div className="utility-actions">
-            <button disabled={updateChecking} onClick={() => void checkForUpdates(true)} type="button">
+            <button disabled={updateChecking || updateInstalling} onClick={() => void checkForUpdates(true)} type="button">
               <RefreshCcw size={15} />
               {updateChecking ? '检查中' : '检查更新'}
             </button>
             <button
-              disabled={!updateCheck.assetDownloadUrl || updateCheck.status !== 'available'}
+              disabled={
+                updateInstalling ||
+                !updateCheck.assetDownloadUrl ||
+                updateCheck.status !== 'available'
+              }
               onClick={() => void downloadUpdateAsset()}
               type="button"
             >
               <Download size={15} />
-              下载适配包
+              {updateInstalling ? '更新中' : '更新'}
             </button>
-            <button onClick={() => void openReleasePage()} type="button">
+            <button disabled={updateInstalling} onClick={() => void openReleasePage()} type="button">
               <ExternalLink size={15} />
               Release 页面
             </button>

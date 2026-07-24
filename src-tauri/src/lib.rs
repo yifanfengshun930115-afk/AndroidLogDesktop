@@ -87,6 +87,7 @@ pub fn run() {
             logcat::start_logcat,
             logcat::stop_logcat,
             update::check_for_updates,
+            update::install_update,
             update::open_external_url
         ])
         .run(tauri::generate_context!())
