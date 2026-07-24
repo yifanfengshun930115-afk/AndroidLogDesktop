@@ -1012,7 +1012,8 @@
 
 .no-soft-wrap .log-header,
 .no-soft-wrap .log-row {
-  min-width: 100%;
+  width: max-content;
+  min-width: var(--log-min-width);
 }
 
 .log-header {

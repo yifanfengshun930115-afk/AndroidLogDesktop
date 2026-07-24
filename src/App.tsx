@@ -2904,6 +2904,15 @@ function App() {
                   </button>
                 </div>
                 <div className="filter-option-list">
+                  <button
+                    className={`filter-option compact ${activeTab.selectedLevels.length === 0 ? 'selected' : ''}`}
+                    onClick={() => updateActiveTab((tab) => ({ ...tab, selectedLevels: [] }))}
+                  >
+                    <input readOnly checked={activeTab.selectedLevels.length === 0} type="checkbox" />
+                    <span>
+                      <strong>全部</strong>
+                    </span>
+                  </button>
                   {LOG_LEVEL_OPTIONS.map((level) => {
                     const checked = activeTab.selectedLevels.includes(level.value)
                     return (
@@ -3010,12 +3019,12 @@ function App() {
               }}
             >
               <Columns3 size={16} />
-              内容 {activeTab.visibleLogFields.length}/{ALL_LOG_FIELDS.length}
+              列显示 {activeTab.visibleLogFields.length}/{ALL_LOG_FIELDS.length}
             </button>
             {contentMenuOpen ? (
               <div className="filter-popover filter-popover-narrow">
                 <div className="popover-header">
-                  <strong>内容</strong>
+                  <strong>列显示</strong>
                   <button className="icon-button" onClick={() => setContentMenuOpen(false)}>
                     <X size={16} />
                   </button>
