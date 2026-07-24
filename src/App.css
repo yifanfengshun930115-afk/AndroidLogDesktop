@@ -1010,7 +1010,6 @@
   min-width: 100%;
 }
 
-.no-soft-wrap .log-header,
 .no-soft-wrap .log-row {
   width: max-content;
   min-width: var(--log-min-width);
@@ -1073,13 +1072,17 @@
     opacity 120ms ease;
 }
 
+.log-header-cell:last-child .column-resizer::after {
+  opacity: 0;
+}
+
 .column-resizer:hover,
 .column-resizer.active {
   border: 0;
   background: transparent;
 }
 
-.log-header-cell:hover .column-resizer::after,
+.log-header-cell:not(:last-child):hover .column-resizer::after,
 .column-resizer:hover::after,
 .column-resizer.active::after {
   background: var(--color-primary);
