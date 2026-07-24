@@ -11,6 +11,7 @@
   --color-text-soft: #4e5a6b;
   --color-primary: #1f7a5c;
   --color-primary-strong: #0f5f45;
+  --color-primary-contrast: #ffffff;
   --color-primary-soft: #e8f4ef;
   --color-danger: #b92f16;
   --color-danger-strong: #9f351a;
@@ -71,6 +72,7 @@
   --color-text-soft: #c0cad8;
   --color-primary: #4aa982;
   --color-primary-strong: #6cc49d;
+  --color-primary-contrast: #06130e;
   --color-primary-soft: #17382c;
   --color-danger: #ff8a72;
   --color-danger-strong: #ffb09f;

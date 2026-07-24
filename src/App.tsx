@@ -41,6 +41,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
+import { closeApp } from './api/appLifecycle'
 import { listAdbDevices, listAdbProcesses } from './api/adb'
 import { exportLogs, revealExportFile } from './api/exportLogs'
 import {
@@ -57,6 +58,7 @@ import { LogStore, logStore, type SerializedLogEntry } from './logStore'
 import {
   compileSearchMatcher,
   findSearchMatchRanges,
+  normalizeSearchOptions,
   type CompiledSearchMatcher,
   type LogSearchOptions,
 } from './search'
@@ -122,6 +124,12 @@ interface InitialAppState {
   tabs: LogTab[]
   activeTabId: string
   nextTabIndex: number
+  drawerOpen: boolean
+  findBarOpen: boolean
+  logColorScheme: LogColorScheme
+  logFontSize: number
+  logRowPadding: number
+  theme: 'light' | 'dark'
 }
 
 interface ToastMessage {
@@ -129,6 +137,35 @@ interface ToastMessage {
   tone: 'success' | 'danger'
   title: string
   message?: string
+}
+
+interface PersistedLogTabState {
+  id: string
+  title: string
+  selectedSerial: string
+  paused: boolean
+  softWrap: boolean
+  selectedLevels: LogLevel[]
+  searchText: string
+  selectedTags: string[]
+  selectedPackages: string[]
+  visibleLogFields: LogField[]
+  searchOptions: LogSearchOptions
+  findText: string
+  findOptions: LogSearchOptions
+}
+
+interface PersistedAppState {
+  schemaVersion: 1
+  tabs: PersistedLogTabState[]
+  activeTabId: string
+  nextTabIndex: number
+  drawerOpen: boolean
+  findBarOpen: boolean
+  logColorScheme: LogColorScheme
+  logFontSize: number
+  logRowPadding: number
+  theme: 'light' | 'dark'
 }
 
 const LOG_COLOR_SCHEME_LABELS: Record<LogColorScheme, string> = {
@@ -163,6 +200,7 @@ const DEFAULT_SEARCH_OPTIONS: LogSearchOptions = {
 }
 const LOG_FONT_SIZE_STORAGE_KEY = 'android-log-desktop.logFontSize'
 const LOG_ROW_PADDING_STORAGE_KEY = 'android-log-desktop.logRowPadding'
+const APP_STATE_STORAGE_KEY = 'android-log-desktop.appState.v1'
 const DEFAULT_LOG_FONT_SIZE = 12
 const DEFAULT_LOG_ROW_PADDING = 7
 const LOG_FONT_SIZE_RANGE = { min: 10, max: 18 }
@@ -170,6 +208,7 @@ const LOG_ROW_PADDING_RANGE = { min: 3, max: 12 }
 const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
 const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
+const APP_CLOSE_REQUESTED_EVENT = 'app://close-requested'
 
 const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWidth: number }> = {
   time: { nowrap: '150px', wrap: '150px', minWidth: 150 },
@@ -209,6 +248,111 @@ function createDetachedPlaceholderTab(transferId: string): LogTab {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function stringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+function normalizeTheme(value: unknown): 'light' | 'dark' {
+  return value === 'dark' ? 'dark' : 'light'
+}
+
+function normalizeLogColorScheme(value: unknown): LogColorScheme {
+  return value === 'idea' || value === 'vscode' ? value : 'android-studio'
+}
+
+function normalizeLogLevels(value: unknown): LogLevel[] {
+  const allowedLevels = new Set(LOG_LEVEL_OPTIONS.map((option) => option.value))
+  return stringList(value).filter((level): level is LogLevel => allowedLevels.has(level as LogLevel))
+}
+
+function normalizePersistedTabState(value: unknown, index: number): PersistedLogTabState {
+  const data = isRecord(value) ? value : {}
+  return {
+    id: typeof data.id === 'string' && data.id.trim() ? data.id : `tab-${index + 1}`,
+    title: typeof data.title === 'string' && data.title.trim() ? data.title.trim().slice(0, 80) : `Logcat ${index + 1}`,
+    selectedSerial: typeof data.selectedSerial === 'string' ? data.selectedSerial : '',
+    paused: Boolean(data.paused),
+    softWrap: Boolean(data.softWrap),
+    selectedLevels: normalizeLogLevels(data.selectedLevels),
+    searchText: typeof data.searchText === 'string' ? data.searchText : '',
+    selectedTags: stringList(data.selectedTags),
+    selectedPackages: stringList(data.selectedPackages),
+    visibleLogFields: normalizeLogFields(stringList(data.visibleLogFields) as LogField[]),
+    searchOptions: normalizeSearchOptions(isRecord(data.searchOptions) ? data.searchOptions : undefined),
+    findText: typeof data.findText === 'string' ? data.findText : '',
+    findOptions: normalizeSearchOptions(isRecord(data.findOptions) ? data.findOptions : undefined),
+  }
+}
+
+function readPersistedAppState(): PersistedAppState | undefined {
+  try {
+    const payload = window.localStorage.getItem(APP_STATE_STORAGE_KEY)
+    if (!payload) {
+      return undefined
+    }
+
+    const parsed = JSON.parse(payload) as unknown
+    if (!isRecord(parsed) || parsed.schemaVersion !== 1) {
+      return undefined
+    }
+
+    const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
+      .map((tab, index) => normalizePersistedTabState(tab, index))
+      .slice(0, 12)
+    if (tabs.length === 0) {
+      return undefined
+    }
+
+    return {
+      schemaVersion: 1,
+      tabs,
+      activeTabId: typeof parsed.activeTabId === 'string' ? parsed.activeTabId : tabs[0].id,
+      nextTabIndex: Number.isFinite(Number(parsed.nextTabIndex)) ? Number(parsed.nextTabIndex) : 2,
+      drawerOpen: typeof parsed.drawerOpen === 'boolean' ? parsed.drawerOpen : true,
+      findBarOpen: Boolean(parsed.findBarOpen),
+      logColorScheme: normalizeLogColorScheme(parsed.logColorScheme),
+      logFontSize: clampNumber(
+        Number(parsed.logFontSize),
+        LOG_FONT_SIZE_RANGE.min,
+        LOG_FONT_SIZE_RANGE.max,
+      ),
+      logRowPadding: clampNumber(
+        Number(parsed.logRowPadding),
+        LOG_ROW_PADDING_RANGE.min,
+        LOG_ROW_PADDING_RANGE.max,
+      ),
+      theme: normalizeTheme(parsed.theme),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function createLogTabFromPersistedState(state: PersistedLogTabState, index: number, existingIds: Set<string>) {
+  const tab = createLogTab(index + 1, state.selectedSerial)
+  return {
+    ...tab,
+    id: uniqueTabId(state.id, existingIds),
+    title: state.title,
+    paused: state.paused,
+    softWrap: state.softWrap,
+    selectedLevels: [...state.selectedLevels],
+    searchText: state.searchText,
+    selectedTags: [...state.selectedTags],
+    selectedPackages: [...state.selectedPackages],
+    visibleLogFields: normalizeLogFields(state.visibleLogFields),
+    searchOptions: { ...state.searchOptions },
+    findText: state.findText,
+    findOptions: { ...state.findOptions },
+  } satisfies LogTab
+}
+
 function createInitialAppState(detachedTransferId: string): InitialAppState {
   if (detachedTransferId) {
     const tab = createDetachedPlaceholderTab(detachedTransferId)
@@ -216,6 +360,47 @@ function createInitialAppState(detachedTransferId: string): InitialAppState {
       tabs: [tab],
       activeTabId: tab.id,
       nextTabIndex: 1,
+      drawerOpen: false,
+      findBarOpen: false,
+      logColorScheme: 'android-studio',
+      logFontSize: readNumberPreference(
+        LOG_FONT_SIZE_STORAGE_KEY,
+        DEFAULT_LOG_FONT_SIZE,
+        LOG_FONT_SIZE_RANGE.min,
+        LOG_FONT_SIZE_RANGE.max,
+      ),
+      logRowPadding: readNumberPreference(
+        LOG_ROW_PADDING_STORAGE_KEY,
+        DEFAULT_LOG_ROW_PADDING,
+        LOG_ROW_PADDING_RANGE.min,
+        LOG_ROW_PADDING_RANGE.max,
+      ),
+      theme: 'light',
+    }
+  }
+
+  const persistedState = readPersistedAppState()
+  if (persistedState) {
+    const existingIds = new Set<string>()
+    const tabs = persistedState.tabs.map((tabState, index) => {
+      const tab = createLogTabFromPersistedState(tabState, index, existingIds)
+      existingIds.add(tab.id)
+      return tab
+    })
+    const activeTabId = tabs.some((tab) => tab.id === persistedState.activeTabId)
+      ? persistedState.activeTabId
+      : tabs[0].id
+
+    return {
+      tabs,
+      activeTabId,
+      nextTabIndex: Math.max(persistedState.nextTabIndex, nextLogcatIndex(tabs)),
+      drawerOpen: persistedState.drawerOpen,
+      findBarOpen: persistedState.findBarOpen,
+      logColorScheme: persistedState.logColorScheme,
+      logFontSize: persistedState.logFontSize,
+      logRowPadding: persistedState.logRowPadding,
+      theme: persistedState.theme,
     }
   }
 
@@ -224,6 +409,22 @@ function createInitialAppState(detachedTransferId: string): InitialAppState {
     tabs: [tab],
     activeTabId: tab.id,
     nextTabIndex: 2,
+    drawerOpen: true,
+    findBarOpen: false,
+    logColorScheme: 'android-studio',
+    logFontSize: readNumberPreference(
+      LOG_FONT_SIZE_STORAGE_KEY,
+      DEFAULT_LOG_FONT_SIZE,
+      LOG_FONT_SIZE_RANGE.min,
+      LOG_FONT_SIZE_RANGE.max,
+    ),
+    logRowPadding: readNumberPreference(
+      LOG_ROW_PADDING_STORAGE_KEY,
+      DEFAULT_LOG_ROW_PADDING,
+      LOG_ROW_PADDING_RANGE.min,
+      LOG_ROW_PADDING_RANGE.max,
+    ),
+    theme: 'light',
   }
 }
 
@@ -468,6 +669,32 @@ function writeNumberPreference(key: string, value: number) {
   }
 }
 
+function serializeTabForPersistence(tab: LogTab): PersistedLogTabState {
+  return {
+    id: tab.id,
+    title: tab.title,
+    selectedSerial: tab.selectedSerial,
+    paused: tab.paused,
+    softWrap: tab.softWrap,
+    selectedLevels: [...tab.selectedLevels],
+    searchText: tab.searchText,
+    selectedTags: [...tab.selectedTags],
+    selectedPackages: [...tab.selectedPackages],
+    visibleLogFields: normalizeLogFields(tab.visibleLogFields),
+    searchOptions: { ...tab.searchOptions },
+    findText: tab.findText,
+    findOptions: { ...tab.findOptions },
+  }
+}
+
+function writePersistedAppState(state: PersistedAppState) {
+  try {
+    window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // State restore is a convenience; restricted WebViews may block localStorage.
+  }
+}
+
 function HighlightedText({
   className,
   matcher,
@@ -516,38 +743,26 @@ function App() {
   const [logError, setLogError] = useState('')
   const [isExporting, setIsExporting] = useState(false)
   const [toast, setToast] = useState<ToastMessage>()
-  const [drawerOpen, setDrawerOpen] = useState(true)
+  const [drawerOpen, setDrawerOpen] = useState(initialAppState.drawerOpen)
   const [packageMenuOpen, setPackageMenuOpen] = useState(false)
   const [packageSearch, setPackageSearch] = useState('')
   const [levelMenuOpen, setLevelMenuOpen] = useState(false)
   const [tagMenuOpen, setTagMenuOpen] = useState(false)
   const [tagSearch, setTagSearch] = useState('')
   const [contentMenuOpen, setContentMenuOpen] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
-  const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>('android-studio')
-  const [logFontSize, setLogFontSize] = useState(() =>
-    readNumberPreference(
-      LOG_FONT_SIZE_STORAGE_KEY,
-      DEFAULT_LOG_FONT_SIZE,
-      LOG_FONT_SIZE_RANGE.min,
-      LOG_FONT_SIZE_RANGE.max,
-    ),
-  )
-  const [logRowPadding, setLogRowPadding] = useState(() =>
-    readNumberPreference(
-      LOG_ROW_PADDING_STORAGE_KEY,
-      DEFAULT_LOG_ROW_PADDING,
-      LOG_ROW_PADDING_RANGE.min,
-      LOG_ROW_PADDING_RANGE.max,
-    ),
-  )
+  const [theme, setTheme] = useState<'light' | 'dark'>(initialAppState.theme)
+  const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>(initialAppState.logColorScheme)
+  const [logFontSize, setLogFontSize] = useState(initialAppState.logFontSize)
+  const [logRowPadding, setLogRowPadding] = useState(initialAppState.logRowPadding)
   const [startingTabId, setStartingTabId] = useState('')
   const [detachingTabId, setDetachingTabId] = useState('')
   const [returningToMain, setReturningToMain] = useState(false)
   const [dragOverTabId, setDragOverTabId] = useState('')
   const [editingTabId, setEditingTabId] = useState('')
   const [editingTabTitle, setEditingTabTitle] = useState('')
-  const [findBarOpen, setFindBarOpen] = useState(false)
+  const [findBarOpen, setFindBarOpen] = useState(initialAppState.findBarOpen)
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
+  const [closingApp, setClosingApp] = useState(false)
   const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
   const nextTabIndexRef = useRef(initialAppState.nextTabIndex)
@@ -587,6 +802,7 @@ function App() {
         }
         setTabs([tab])
         setActiveTabId(tab.id)
+        setDrawerOpen(false)
         nextTabIndexRef.current = nextLogcatIndex([tab])
       } catch (error) {
         if (!disposed) {
@@ -733,6 +949,30 @@ function App() {
   }, [activeTab?.title, isDetachedWindow])
 
   useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    listen(APP_CLOSE_REQUESTED_EVENT, () => {
+      setExitConfirmOpen(true)
+    })
+      .then((callback) => {
+        if (disposed) {
+          callback()
+          return
+        }
+        unlisten = callback
+      })
+      .catch((error) => {
+        setLogError(error instanceof Error ? error.message : String(error))
+      })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
@@ -747,6 +987,35 @@ function App() {
   useEffect(() => {
     writeNumberPreference(LOG_ROW_PADDING_STORAGE_KEY, logRowPadding)
   }, [logRowPadding])
+
+  useEffect(() => {
+    if (isDetachedWindow) {
+      return
+    }
+
+    writePersistedAppState({
+      schemaVersion: 1,
+      tabs: tabs.map(serializeTabForPersistence),
+      activeTabId,
+      nextTabIndex: nextTabIndexRef.current,
+      drawerOpen,
+      findBarOpen,
+      logColorScheme,
+      logFontSize,
+      logRowPadding,
+      theme,
+    })
+  }, [
+    activeTabId,
+    drawerOpen,
+    findBarOpen,
+    isDetachedWindow,
+    logColorScheme,
+    logFontSize,
+    logRowPadding,
+    tabs,
+    theme,
+  ])
 
   useEffect(() => {
     setPackageMenuOpen(false)
@@ -905,7 +1174,6 @@ function App() {
           return {
             ...tab,
             selectedSerial: nextOnlineDevices[0]?.serial ?? '',
-            selectedPackages: [],
             processes: [],
           }
         }),
@@ -921,7 +1189,6 @@ function App() {
         current.map((tab) => ({
           ...tab,
           selectedSerial: '',
-          selectedPackages: [],
           processes: [],
         })),
       )
@@ -1017,6 +1284,26 @@ function App() {
       setIsExporting(false)
     }
   }, [activeTab.store, showToast])
+
+  const handleExitApp = useCallback(async () => {
+    setClosingApp(true)
+    try {
+      await closeApp()
+    } catch (error) {
+      setClosingApp(false)
+      setExitConfirmOpen(false)
+      setLogError(error instanceof Error ? error.message : String(error))
+    }
+  }, [])
+
+  const handleMinimizeApp = useCallback(async () => {
+    setExitConfirmOpen(false)
+    try {
+      await getCurrentWindow().minimize()
+    } catch (error) {
+      setLogError(error instanceof Error ? error.message : String(error))
+    }
+  }, [])
 
   const togglePackage = useCallback(
     (packageName: string) => {
@@ -1435,6 +1722,32 @@ function App() {
 
   return (
     <main className="app-shell">
+      {exitConfirmOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="exit-confirm-title">
+            <div>
+              <h2 id="exit-confirm-title">关闭 Android Log Desktop？</h2>
+              <p>退出前会停止正在运行的 adb logcat 命令。选择最小化会保留当前监听状态。</p>
+            </div>
+            <div className="confirm-actions">
+              <button
+                className="danger-button"
+                disabled={closingApp}
+                onClick={() => void handleExitApp()}
+                type="button"
+              >
+                {closingApp ? '正在退出...' : '退出应用'}
+              </button>
+              <button disabled={closingApp} onClick={() => void handleMinimizeApp()} type="button">
+                最小化
+              </button>
+              <button disabled={closingApp} onClick={() => setExitConfirmOpen(false)} type="button">
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {drawerOpen ? <button className="drawer-backdrop" onClick={() => setDrawerOpen(false)} /> : null}
       <aside className={`drawer ${drawerOpen ? 'open' : ''}`}>
         <div className="brand">

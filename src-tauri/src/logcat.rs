@@ -82,6 +82,15 @@ fn stop_process(process: &mut LogcatProcess) {
     let _ = process.child.wait();
 }
 
+pub fn stop_all_logcat_processes(state: &LogcatState) -> Result<(), String> {
+    let mut processes = state.processes.lock().map_err(|error| error.to_string())?;
+    for process in processes.values_mut() {
+        stop_process(process);
+    }
+    processes.clear();
+    Ok(())
+}
+
 fn spawn_stdout_reader(
     app: AppHandle,
     session_id: String,
@@ -204,11 +213,7 @@ pub fn stop_logcat(
     session_id: Option<String>,
 ) -> Result<LogcatSessionInfo, String> {
     let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
-        let mut processes = state.processes.lock().map_err(|error| error.to_string())?;
-        for process in processes.values_mut() {
-            stop_process(process);
-        }
-        processes.clear();
+        stop_all_logcat_processes(&state)?;
         return Ok(LogcatSessionInfo {
             session_id: String::new(),
             serial: String::new(),

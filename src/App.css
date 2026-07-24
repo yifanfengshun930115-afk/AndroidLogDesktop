@@ -591,6 +591,69 @@
   color: var(--color-primary-strong);
 }
 
+.modal-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: var(--color-overlay);
+  backdrop-filter: blur(8px);
+  padding: 24px;
+}
+
+.confirm-dialog {
+  display: grid;
+  width: min(460px, 100%);
+  gap: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-popover);
+  padding: 22px;
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 8px;
+  color: var(--color-text);
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.confirm-actions button {
+  min-height: 36px;
+  min-width: 88px;
+  font-weight: 700;
+  padding: 0 14px;
+}
+
+.danger-button {
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: #ffffff;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: var(--color-danger-strong);
+  background: var(--color-danger-strong);
+  color: #ffffff;
+}
+
 .notice {
   display: flex;
   align-items: flex-start;
@@ -1016,7 +1079,13 @@
 .primary {
   border-color: var(--color-primary);
   background: var(--color-primary);
-  color: var(--color-surface);
+  color: var(--color-primary-contrast);
+}
+
+.primary:hover:not(:disabled) {
+  border-color: var(--color-primary-strong);
+  background: var(--color-primary-strong);
+  color: var(--color-primary-contrast);
 }
 
 @media (max-width: 860px) {

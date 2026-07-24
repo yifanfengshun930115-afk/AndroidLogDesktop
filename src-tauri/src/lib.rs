@@ -3,7 +3,10 @@ mod export;
 mod logcat;
 mod transfer;
 
-use tauri::{Manager, WebviewWindowBuilder};
+use std::{thread, time::Duration};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder, WindowEvent};
+
+const APP_CLOSE_REQUESTED_EVENT: &str = "app://close-requested";
 
 fn ensure_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     let window = match app.get_webview_window("main") {
@@ -21,11 +24,42 @@ fn ensure_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_main_window_after(app: AppHandle, delay_ms: u64) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(delay_ms));
+        show_main_window(&app);
+    });
+}
+
+#[tauri::command]
+fn close_app(app: AppHandle, state: State<'_, logcat::LogcatState>) -> Result<(), String> {
+    logcat::stop_all_logcat_processes(&state)?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(logcat::LogcatState::default())
         .manage(transfer::TabTransferState::default())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.emit(APP_CLOSE_REQUESTED_EVENT, ());
+            }
+        })
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -35,6 +69,8 @@ pub fn run() {
                 )?;
             }
             ensure_main_window(app)?;
+            show_main_window_after(app.handle().clone(), 250);
+            show_main_window_after(app.handle().clone(), 1200);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +82,7 @@ pub fn run() {
             transfer::clear_tab_transfer,
             transfer::put_tab_transfer,
             transfer::take_tab_transfer,
+            close_app,
             logcat::start_logcat,
             logcat::stop_logcat
         ])
