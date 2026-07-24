@@ -49,6 +49,21 @@ describe('LogStore', () => {
     expect(store.getVisibleEntriesWindow(2).map((entry) => entry.sequence)).toEqual([3, 4, 5])
   })
 
+  it('allows an explicit larger visible window for bottom overscan', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 3 })
+
+    store.appendRawBatch({ sessionId: 's1', lines })
+    store.appendRawBatch({ sessionId: 's1', lines })
+
+    expect(store.getVisibleEntriesWindow(99, 5).map((entry) => entry.sequence)).toEqual([
+      4,
+      5,
+      6,
+      7,
+      8,
+    ])
+  })
+
   it('maintains an incremental filtered sequence list for active filters', () => {
     const store = new LogStore({ capacity: 10, displayLimit: 10 })
 

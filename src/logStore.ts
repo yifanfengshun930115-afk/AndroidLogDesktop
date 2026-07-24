@@ -467,7 +467,7 @@ export class LogStore {
 
   getVisibleEntriesWindow(startIndex = 0, limit = this.displayLimit) {
     this.trimStaleFilteredSequences()
-    const safeLimit = Math.max(1, Math.min(this.displayLimit, Math.floor(limit)))
+    const safeLimit = Math.max(1, Math.min(this.capacity, Math.floor(limit)))
     const maxStart = Math.max(0, this.filteredSequences.length - safeLimit)
     const safeStart = Math.max(0, Math.min(Math.floor(startIndex), maxStart))
 
