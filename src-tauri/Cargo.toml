@@ -1,6 +1,6 @@
 [package]
 name = "android-log-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lightweight Android logcat desktop client."
 authors = ["gzq"]
 license = ""
