@@ -30,6 +30,7 @@ export interface LogQuery {
   tids?: string[]
   sessions?: string[]
   devices?: string[]
+  applicationIds?: string[]
   crashOnly?: boolean
   startEpochMs?: number
   endEpochMs?: number
@@ -81,7 +82,16 @@ export interface LogStoreSnapshot {
 }
 
 type Subscriber = () => void
-type IndexedField = 'level' | 'tag' | 'pid' | 'pidDevice' | 'tid' | 'session' | 'device' | 'crash'
+type IndexedField =
+  | 'level'
+  | 'tag'
+  | 'pid'
+  | 'pidDevice'
+  | 'tid'
+  | 'session'
+  | 'device'
+  | 'application'
+  | 'crash'
 
 const DEFAULT_CAPACITY = 100000
 const DEFAULT_DISPLAY_LIMIT = 1000
@@ -102,6 +112,7 @@ const EMPTY_QUERY: NormalizedLogQuery = {
   tids: [],
   sessions: [],
   devices: [],
+  applicationIds: [],
   crashOnly: false,
 }
 
@@ -118,6 +129,7 @@ interface NormalizedLogQuery {
   tids: string[]
   sessions: string[]
   devices: string[]
+  applicationIds: string[]
   crashOnly: boolean
   startEpochMs?: number
   endEpochMs?: number
@@ -202,6 +214,7 @@ function normalizeQuery(query: Partial<LogQuery>): NormalizedLogQuery {
     tids: normalizeList(query.tids),
     sessions: normalizeList(query.sessions),
     devices: normalizeList(query.devices),
+    applicationIds: normalizeList(query.applicationIds),
     crashOnly: Boolean(query.crashOnly),
     startEpochMs: normalizeEpoch(query.startEpochMs),
     endEpochMs: normalizeEpoch(query.endEpochMs),
@@ -220,6 +233,7 @@ function queryKey(query: NormalizedLogQuery) {
     tids: query.tids,
     sessions: query.sessions,
     devices: query.devices,
+    applicationIds: query.applicationIds,
     crashOnly: query.crashOnly,
     startEpochMs: query.startEpochMs,
     endEpochMs: query.endEpochMs,
@@ -285,6 +299,7 @@ export class LogStore {
   private readonly tidIndex = new Map<string, SequenceBucket>()
   private readonly sessionIndex = new Map<string, SequenceBucket>()
   private readonly deviceIndex = new Map<string, SequenceBucket>()
+  private readonly applicationIndex = new Map<string, SequenceBucket>()
   private readonly crashIndex = new SequenceBucket()
   private activeQuery = EMPTY_QUERY
   private activeQueryKey = queryKey(EMPTY_QUERY)
@@ -454,6 +469,7 @@ export class LogStore {
     this.tidIndex.clear()
     this.sessionIndex.clear()
     this.deviceIndex.clear()
+    this.applicationIndex.clear()
     this.crashIndex.clear()
     this.commitChange()
   }
@@ -504,6 +520,19 @@ export class LogStore {
       }))
   }
 
+  getApplicationOptions() {
+    const minSequence = this.oldestSequence()
+    return [...this.applicationIndex.entries()]
+      .filter(([, bucket]) => !bucket.isEmpty(minSequence))
+      .map(([key, bucket]) => {
+        const entry = this.getBySequence(bucket.firstValue(minSequence) ?? 0)
+        return [entry?.applicationId, entry?.processName].find(
+          (value) => value?.trim().toLowerCase() === key,
+        ) ?? key
+      })
+      .sort((first, second) => first.localeCompare(second))
+  }
+
   private appendEntry(entry: LogEntry) {
     let evicted = false
     if (this.size === this.capacity) {
@@ -531,9 +560,26 @@ export class LogStore {
     this.indexValue(this.pidDeviceIndex, createPidDeviceKey(entry.deviceSerial, entry.pid), entry.sequence)
     this.indexValue(this.tidIndex, entry.tid, entry.sequence)
     this.indexValue(this.deviceIndex, entry.deviceSerial, entry.sequence)
+    for (const applicationKey of this.applicationKeys(entry)) {
+      this.indexValue(this.applicationIndex, applicationKey, entry.sequence)
+    }
     if (entry.isCrash) {
       this.crashIndex.append(entry.sequence)
     }
+  }
+
+  private applicationKeys(entry: LogEntry) {
+    const seen = new Set<string>()
+    return [entry.applicationId, entry.processName]
+      .map((value) => value?.trim())
+      .filter((value): value is string => {
+        const key = value?.toLowerCase()
+        if (!value || !key || seen.has(key)) {
+          return false
+        }
+        seen.add(key)
+        return true
+      })
   }
 
   private indexValue(index: Map<string, SequenceBucket>, value: string | undefined, sequence: number) {
@@ -575,6 +621,12 @@ export class LogStore {
     if (
       query.devices.length > 0 &&
       !query.devices.includes(entry.deviceSerial?.toLowerCase() ?? '')
+    ) {
+      return false
+    }
+    if (
+      query.applicationIds.length > 0 &&
+      !this.applicationKeys(entry).some((value) => query.applicationIds.includes(value.toLowerCase()))
     ) {
       return false
     }
@@ -631,6 +683,11 @@ export class LogStore {
     this.addCandidate(candidates, 'tid', this.sequencesForValues(this.tidIndex, query.tids))
     this.addCandidate(candidates, 'session', this.sequencesForValues(this.sessionIndex, query.sessions))
     this.addCandidate(candidates, 'device', this.sequencesForValues(this.deviceIndex, query.devices))
+    this.addCandidate(
+      candidates,
+      'application',
+      this.sequencesForValues(this.applicationIndex, query.applicationIds),
+    )
     this.addCandidate(
       candidates,
       'crash',
@@ -701,6 +758,7 @@ export class LogStore {
     this.pruneIndex(this.tidIndex, minSequence)
     this.pruneIndex(this.sessionIndex, minSequence)
     this.pruneIndex(this.deviceIndex, minSequence)
+    this.pruneIndex(this.applicationIndex, minSequence)
     this.crashIndex.pruneBefore(minSequence)
   }
 

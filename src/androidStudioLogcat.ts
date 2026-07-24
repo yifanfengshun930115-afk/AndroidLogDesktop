@@ -34,6 +34,14 @@ export interface AndroidStudioExportContext {
 export interface ParsedAndroidStudioLogcatImport {
   title: string
   deviceSerials: string[]
+  devices: AdbDevice[]
+  filters: {
+    selectedSerials: string[]
+    selectedPackages: string[]
+    selectedTags: string[]
+    selectedLevels: LogLevel[]
+    searchText: string
+  }
   entries: Array<Omit<StructuredLogEntryInput, 'sessionId' | 'sequence'>>
 }
 
@@ -43,6 +51,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
+}
+
+function stringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+function uniqueStrings(values: string[]) {
+  const seen = new Set<string>()
+  return values
+    .map((value) => value.trim())
+    .filter((value) => {
+      const key = value.toLowerCase()
+      if (!value || seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
 }
 
 function integerValue(value: unknown) {
@@ -128,11 +156,8 @@ function projectApplicationIds(entries: LogEntry[], context: AndroidStudioExport
 
 function filterText(context: AndroidStudioExportContext) {
   const parts: string[] = []
-  for (const serial of context.selectedSerials) {
-    parts.push(`device:${serial}`)
-  }
-  for (const packageName of context.selectedPackages) {
-    parts.push(`package:${packageName}`)
+  if (context.selectedPackages.length > 0) {
+    parts.push('package:mine')
   }
   for (const level of context.selectedLevels) {
     parts.push(`level:${androidStudioLevelFromLogLevel(level)}`)
@@ -230,6 +255,95 @@ function serialFromMetadata(metadata: unknown) {
   return stringValue(physicalDevice?.serialNumber).trim()
 }
 
+function devicesFromMetadata(metadata: unknown, fallbackSerial: string): AdbDevice[] {
+  const physicalDevice = physicalDeviceFromMetadata(metadata)
+  const serial = stringValue(physicalDevice?.serialNumber).trim() || fallbackSerial
+  if (!serial) {
+    return []
+  }
+
+  const parts = [
+    ['manufacturer', stringValue(physicalDevice?.manufacturer)],
+    ['model', stringValue(physicalDevice?.model)],
+    ['release', stringValue(physicalDevice?.release)],
+    ['api', String(integerValue(isRecord(physicalDevice?.apiLevel) ? physicalDevice.apiLevel.majorVersion : 0))],
+    ['device', stringValue(physicalDevice?.model) || serial],
+  ].flatMap(([key, value]) => (value && value !== '0' ? [`${key}:${value.replace(/ /g, '_')}`] : []))
+
+  return [
+    {
+      serial,
+      state: physicalDevice?.isOnline === false ? 'offline' : 'device',
+      description: parts.join(' '),
+    },
+  ]
+}
+
+function projectApplicationIdsFromMetadata(metadata: unknown) {
+  return isRecord(metadata) ? uniqueStrings(stringList(metadata.projectApplicationIds)) : []
+}
+
+function parseFilterTokens(filter: string) {
+  const tokens: Array<{ key: string; value: string; excluded: boolean }> = []
+  const pattern = /(?:^|\s)(-?)([A-Za-z]+):(?:"([^"]*)"|'([^']*)'|(\S+))/g
+  let match = pattern.exec(filter)
+  while (match) {
+    const [, excluded, key, doubleQuotedValue, singleQuotedValue, plainValue] = match
+    const value = (doubleQuotedValue ?? singleQuotedValue ?? plainValue ?? '').trim()
+    if (key && value) {
+      tokens.push({ key: key.toLowerCase(), value, excluded: excluded === '-' })
+    }
+    match = pattern.exec(filter)
+  }
+  return tokens
+}
+
+function filtersFromMetadata(metadata: unknown, allDeviceSerials: string[]) {
+  const projectApplicationIds = projectApplicationIdsFromMetadata(metadata)
+  const filterText = isRecord(metadata) ? stringValue(metadata.filter) : ''
+  const selectedSerials: string[] = []
+  const selectedPackages: string[] = []
+  const selectedTags: string[] = []
+  const selectedLevels: LogLevel[] = []
+  const searchTerms: string[] = []
+
+  for (const token of parseFilterTokens(filterText)) {
+    if (token.excluded) {
+      continue
+    }
+    if (token.key === 'device') {
+      selectedSerials.push(token.value)
+    } else if (['package', 'application', 'applicationid', 'process'].includes(token.key)) {
+      if (token.value.toLowerCase() === 'mine') {
+        selectedPackages.push(...projectApplicationIds)
+      } else {
+        selectedPackages.push(token.value)
+      }
+    } else if (token.key === 'tag') {
+      selectedTags.push(token.value)
+    } else if (token.key === 'level') {
+      const level = logLevelFromAndroidStudioLevel(token.value)
+      if (level !== '?') {
+        selectedLevels.push(level)
+      }
+    } else if (['message', 'msg', 'text'].includes(token.key)) {
+      searchTerms.push(token.value)
+    }
+  }
+
+  const selectedDeviceSerials = uniqueStrings(selectedSerials).filter((serial) =>
+    allDeviceSerials.includes(serial),
+  )
+
+  return {
+    selectedSerials: selectedDeviceSerials.length > 0 ? selectedDeviceSerials : allDeviceSerials,
+    selectedPackages: uniqueStrings(selectedPackages),
+    selectedTags: uniqueStrings(selectedTags),
+    selectedLevels: [...new Set(selectedLevels)],
+    searchText: searchTerms.join(' '),
+  }
+}
+
 function timestampFromHeader(header: Record<string, unknown>) {
   const timestamp = isRecord(header.timestamp) ? header.timestamp : {}
   const seconds = integerValue(timestamp.seconds)
@@ -291,8 +405,10 @@ export function parseAndroidStudioLogcatText(text: string, fileName: string) {
     throw new Error('文件缺少 logcatMessages，无法导入')
   }
 
-  const metadataSerial = serialFromMetadata(data.metadata)
+  const metadata = data.metadata
+  const metadataSerial = serialFromMetadata(metadata)
   const fallbackDeviceSerial = metadataSerial || `import:${fileName || Date.now()}`
+  const devices = devicesFromMetadata(metadata, fallbackDeviceSerial)
   const entries: Array<Omit<StructuredLogEntryInput, 'sessionId' | 'sequence'>> = []
   for (const message of data.logcatMessages) {
     const parsed = parseMessage(message, fallbackDeviceSerial)
@@ -308,6 +424,8 @@ export function parseAndroidStudioLogcatText(text: string, fileName: string) {
   return {
     title: importedTitle(fileName),
     deviceSerials: [fallbackDeviceSerial],
+    devices,
+    filters: filtersFromMetadata(metadata, [fallbackDeviceSerial]),
     entries,
   } satisfies ParsedAndroidStudioLogcatImport
 }

@@ -329,4 +329,53 @@ describe('LogStore', () => {
       timestampNanos: 489000000,
     })
   })
+
+  it('filters imported entries by application id without adb process data', () => {
+    const store = new LogStore({ capacity: 10, displayLimit: 10 })
+    store.appendStructuredBatch({
+      sessionId: 'import-a',
+      entries: [
+        {
+          raw: '07-24 22:30:05.384  1619  2450 I AppWidgetServiceImpl: system message',
+          deviceSerial: 'RFCR301L2JN',
+          pid: '1619',
+          tid: '2450',
+          level: 'I',
+          tag: 'AppWidgetServiceImpl',
+          message: 'system message',
+          applicationId: 'system_server',
+          processName: 'system_server',
+        },
+        {
+          raw: '07-24 22:30:06.384 30864 11455 I TAG_PushManager: push ok',
+          deviceSerial: 'RFCR301L2JN',
+          pid: '30864',
+          tid: '11455',
+          level: 'I',
+          tag: 'TAG_PushManager',
+          message: 'push ok',
+          applicationId: 'com.anynews.global.any.any',
+          processName: 'com.anynews.global.any.any',
+        },
+      ],
+    })
+
+    expect(store.getApplicationOptions()).toEqual([
+      'com.anynews.global.any.any',
+      'system_server',
+    ])
+
+    store.setQuery({
+      applicationIds: ['com.anynews.global.any.any'],
+      tags: ['TAG_PushManager'],
+    })
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.filteredCount).toBe(1)
+    expect(snapshot.visibleEntries[0]).toMatchObject({
+      applicationId: 'com.anynews.global.any.any',
+      tag: 'TAG_PushManager',
+      message: 'push ok',
+    })
+  })
 })

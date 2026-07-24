@@ -97,8 +97,10 @@ import type {
 interface LogTab {
   id: string
   title: string
+  source: LogTabSource
   store: LogStore
   selectedSerials: string[]
+  importedDevices: AdbDevice[]
   sessions: LogcatSessionInfo[]
   paused: boolean
   softWrap: boolean
@@ -119,6 +121,7 @@ interface LogTab {
   restoreSessionRunning?: boolean
 }
 
+type LogTabSource = 'live' | 'imported'
 type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
 type LogField = 'device' | 'time' | 'level' | 'process' | 'tag' | 'message'
 type LogColumnWidths = Partial<Record<LogField, number>>
@@ -134,8 +137,10 @@ interface TabTransferPayload {
   schemaVersion: 1
   id: string
   title: string
+  source?: LogTabSource
   selectedSerial?: string
   selectedSerials?: string[]
+  importedDevices?: AdbDevice[]
   paused: boolean
   softWrap: boolean
   selectedLevels: LogLevel[]
@@ -215,6 +220,7 @@ interface CellCopyMenu {
 interface PersistedLogTabState {
   id: string
   title: string
+  source: LogTabSource
   selectedSerials: string[]
   paused: boolean
   softWrap: boolean
@@ -305,8 +311,10 @@ function createLogTab(index: number, selectedSerials: string[] = []): LogTab {
   return {
     id: `tab-${index}`,
     title: `Logcat ${index}`,
+    source: 'live',
     store: index === 1 ? logStore : new LogStore(),
     selectedSerials: normalizedSerials,
+    importedDevices: [],
     sessions: [],
     paused: false,
     softWrap: false,
@@ -365,6 +373,10 @@ function normalizeSelectedSerials(value: unknown, legacySerial = '') {
 function selectedSerialsFromData(data: Record<string, unknown>) {
   const legacySerial = typeof data.selectedSerial === 'string' ? data.selectedSerial : ''
   return normalizeSelectedSerials(data.selectedSerials, legacySerial)
+}
+
+function normalizeTabSource(value: unknown): LogTabSource {
+  return value === 'imported' ? 'imported' : 'live'
 }
 
 function reconcileLogFieldsForDeviceSelection(
@@ -480,6 +492,7 @@ function normalizePersistedTabState(value: unknown, index: number): PersistedLog
   return {
     id: typeof data.id === 'string' && data.id.trim() ? data.id : `tab-${index + 1}`,
     title: typeof data.title === 'string' && data.title.trim() ? data.title.trim().slice(0, 80) : `Logcat ${index + 1}`,
+    source: normalizeTabSource(data.source),
     selectedSerials,
     paused: Boolean(data.paused),
     softWrap: Boolean(data.softWrap),
@@ -551,6 +564,7 @@ function createLogTabFromPersistedState(state: PersistedLogTabState, index: numb
     ...tab,
     id: uniqueTabId(state.id, existingIds),
     title: state.title,
+    source: state.source,
     paused: state.paused,
     softWrap: state.softWrap,
     selectedLevels: [...state.selectedLevels],
@@ -665,8 +679,10 @@ function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTrans
     schemaVersion: TAB_TRANSFER_SCHEMA_VERSION,
     id: tab.id,
     title: tab.title,
+    source: tab.source,
     selectedSerial: tab.selectedSerials[0] ?? '',
     selectedSerials: [...tab.selectedSerials],
+    importedDevices: tab.importedDevices.map((device) => ({ ...device })),
     paused: tab.paused,
     softWrap: tab.softWrap,
     selectedLevels: [...tab.selectedLevels],
@@ -723,8 +739,10 @@ function createTabFromTransferPayload(payload: TabTransferPayload, existingIds =
   return {
     id: uniqueTabId(payload.id || `tab-${Date.now()}`, existingIds),
     title: payload.title || 'Logcat',
+    source: normalizeTabSource(payload.source),
     store,
     selectedSerials,
+    importedDevices: payload.importedDevices ?? [],
     sessions: [],
     paused: Boolean(payload.paused),
     softWrap: Boolean(payload.softWrap),
@@ -892,6 +910,14 @@ function packageOptions(processes: DeviceProcessInfo[]) {
     .sort((first, second) => first.name.localeCompare(second.name))
 }
 
+function packageOptionsFromApplications(applications: string[], selectedSerials: string[]) {
+  return applications.map<PackageOption>((name) => ({
+    name,
+    pidLabel: '离线',
+    serials: selectedSerials,
+  }))
+}
+
 function packagePidDeviceKeys(processes: DeviceProcessInfo[], selectedPackages: string[]) {
   const selected = new Set(selectedPackages)
   return [
@@ -904,9 +930,8 @@ function packagePidDeviceKeys(processes: DeviceProcessInfo[], selectedPackages: 
   ]
 }
 
-function filterPackageOptions(processes: DeviceProcessInfo[], query: string) {
+function filterPackageOptions(options: PackageOption[], query: string) {
   const normalizedQuery = query.trim().toLowerCase()
-  const options = packageOptions(processes)
   if (!normalizedQuery) {
     return options
   }
@@ -1126,6 +1151,7 @@ function serializeTabForPersistence(tab: LogTab): PersistedLogTabState {
   return {
     id: tab.id,
     title: tab.title,
+    source: tab.source,
     selectedSerials: [...tab.selectedSerials],
     paused: tab.paused,
     softWrap: tab.softWrap,
@@ -1382,22 +1408,42 @@ function App() {
     () => devices.filter((device) => device.state === 'device'),
     [devices],
   )
+  const activeDeviceOptions = activeTab.source === 'imported' ? activeTab.importedDevices : onlineDevices
   const selectedSerialSet = useMemo(() => new Set(activeTab.selectedSerials), [activeTab.selectedSerials])
   const activeProcesses = useMemo(
     () => processesForSelectedDevices(activeTab.processesBySerial, activeTab.selectedSerials),
     [activeTab.processesBySerial, activeTab.selectedSerials],
   )
   const hasSelectedDevice = activeTab.selectedSerials.length > 0
+  const canControlLogcat = activeTab.source === 'live' && hasSelectedDevice
   const isRunning = activeTab.sessions.some((session) => session.running)
   const isStarting = startingTabId === activeTab.id
+  const startPauseLabel =
+    activeTab.source === 'imported'
+      ? '离线'
+      : !isRunning
+        ? isStarting ? '启动中' : '开始'
+        : activeTab.paused ? '继续' : '暂停'
   const activeLogWindowStart = logWindowStarts[activeTabId] ?? 0
   const activeStickToBottom = logStickToBottomByTabRef.current[activeTabId] ?? true
   const activeLogWindowLimit = activeStickToBottom
     ? Math.min(logSnapshot.capacity, logSnapshot.displayLimit + LOG_BOTTOM_OVERSCAN_ROWS)
     : logSnapshot.displayLimit
   const visibleLogs = activeStore.getVisibleEntriesWindow(activeLogWindowStart, activeLogWindowLimit)
-  const packages = packageOptions(activeProcesses)
-  const visiblePackages = filterPackageOptions(activeProcesses, packageSearch)
+  const importedApplications =
+    activeTab.source === 'imported'
+      ? [
+          ...new Set([
+            ...activeTab.selectedPackages,
+            ...activeTab.store.getApplicationOptions(),
+          ]),
+        ]
+      : []
+  const packages =
+    activeTab.source === 'imported'
+      ? packageOptionsFromApplications(importedApplications, activeTab.selectedSerials)
+      : packageOptions(activeProcesses)
+  const visiblePackages = filterPackageOptions(packages, packageSearch)
   const processError = activeTab.selectedSerials
     .map((serial) => activeTab.processErrorsBySerial[serial])
     .filter(Boolean)
@@ -2170,7 +2216,9 @@ function App() {
 
       setAdbInfo(result.adb)
       setDevices(nextDevices)
-      setTabs((current) => current.map((tab) => reconcileTabDevices(tab, nextOnlineSerials)))
+      setTabs((current) =>
+        current.map((tab) => (tab.source === 'imported' ? tab : reconcileTabDevices(tab, nextOnlineSerials))),
+      )
 
       if (!result.ok) {
         setDeviceError(result.error ?? '读取设备列表失败')
@@ -2179,7 +2227,7 @@ function App() {
       setDeviceError(error instanceof Error ? error.message : String(error))
       setDevices([])
       setTabs((current) =>
-        current.map((tab) => reconcileTabDevices(tab, [])),
+        current.map((tab) => (tab.source === 'imported' ? tab : reconcileTabDevices(tab, []))),
       )
     } finally {
       setLoadingDevices(false)
@@ -2195,7 +2243,7 @@ function App() {
     ) => {
       const tab = tabsRef.current.find((item) => item.id === tabId)
       const selectedSerials = normalizeSelectedSerials(selectedSerialsOverride ?? tab?.selectedSerials ?? [])
-      if (!tab || selectedSerials.length === 0) {
+      if (!tab || tab.source === 'imported' || selectedSerials.length === 0) {
         return
       }
 
@@ -2258,6 +2306,9 @@ function App() {
   )
 
   const handleStartPause = useCallback(() => {
+    if (activeTab.source === 'imported') {
+      return
+    }
     if (!isRunning) {
       void startTabLogcat(activeTab.id, activeTab.store.getSnapshot().totalCount === 0)
       return
@@ -2266,8 +2317,11 @@ function App() {
   }, [activeTab, isRunning, startTabLogcat, updateActiveTab])
 
   const handleRestart = useCallback(() => {
+    if (activeTab.source === 'imported') {
+      return
+    }
     void startTabLogcat(activeTab.id, true)
-  }, [activeTab.id, startTabLogcat])
+  }, [activeTab.id, activeTab.source, startTabLogcat])
 
   const toggleDevice = useCallback(
     (serial: string) => {
@@ -2282,7 +2336,7 @@ function App() {
         selected.add(serial)
       }
 
-      const nextSerials = onlineDevices
+      const nextSerials = activeDeviceOptions
         .map((device) => device.serial)
         .filter((deviceSerial) => selected.has(deviceSerial))
 
@@ -2292,7 +2346,8 @@ function App() {
           ...tab,
           selectedSerials: nextSerials,
           deviceSelectionManuallyConfigured: true,
-          selectedPackages: pruneSelectedPackages(tab.selectedPackages, processes),
+          selectedPackages:
+            tab.source === 'imported' ? tab.selectedPackages : pruneSelectedPackages(tab.selectedPackages, processes),
           visibleLogFields: reconcileLogFieldsForDeviceSelection(
             tab.visibleLogFields,
             nextSerials,
@@ -2301,20 +2356,22 @@ function App() {
         }
       })
 
-      for (const nextSerial of nextSerials) {
-        if (
-          !currentTab.processesBySerial[nextSerial] &&
-          !currentTab.loadingProcessesBySerial[nextSerial]
-        ) {
-          void refreshProcesses(activeTab.id, nextSerial)
+      if (currentTab.source === 'live') {
+        for (const nextSerial of nextSerials) {
+          if (
+            !currentTab.processesBySerial[nextSerial] &&
+            !currentTab.loadingProcessesBySerial[nextSerial]
+          ) {
+            void refreshProcesses(activeTab.id, nextSerial)
+          }
+        }
+
+        if (currentTab.sessions.some((session) => session.running)) {
+          void startTabLogcat(activeTab.id, false, { preservePaused: true }, nextSerials)
         }
       }
-
-      if (currentTab.sessions.some((session) => session.running)) {
-        void startTabLogcat(activeTab.id, false, { preservePaused: true }, nextSerials)
-      }
     },
-    [activeTab, onlineDevices, refreshProcesses, startTabLogcat, updateActiveTab],
+    [activeDeviceOptions, activeTab, refreshProcesses, startTabLogcat, updateActiveTab],
   )
 
   const handleClearLogs = useCallback(() => {
@@ -2407,17 +2464,26 @@ function App() {
         const nextIndex = nextTabIndexRef.current
         nextTabIndexRef.current += 1
         const existingIds = new Set(tabsRef.current.map((tab) => tab.id))
-        const baseTab = createLogTab(nextIndex, imported.deviceSerials)
+        const selectedSerials = imported.filters.selectedSerials.length > 0
+          ? imported.filters.selectedSerials
+          : imported.deviceSerials
+        const baseTab = createLogTab(nextIndex, selectedSerials)
         const importedTab = {
           ...baseTab,
           id: uniqueTabId(baseTab.id, existingIds),
           title: imported.title,
+          source: 'imported',
           store,
-          selectedSerials: imported.deviceSerials,
+          selectedSerials,
+          importedDevices: imported.devices,
           paused: true,
+          selectedLevels: imported.filters.selectedLevels,
+          searchText: imported.filters.searchText,
+          selectedTags: imported.filters.selectedTags,
+          selectedPackages: imported.filters.selectedPackages,
           visibleLogFields: reconcileLogFieldsForDeviceSelection(
             DEFAULT_LOG_FIELDS,
-            imported.deviceSerials,
+            selectedSerials,
             false,
           ),
           deviceSelectionManuallyConfigured: true,
@@ -2819,6 +2885,9 @@ function App() {
   }, [applyUpdateInstallProgress])
 
   useEffect(() => {
+    if (activeTab.source === 'imported') {
+      return
+    }
     for (const serial of activeTab.selectedSerials) {
       if (!activeTab.processesBySerial[serial] && !activeTab.loadingProcessesBySerial[serial]) {
         void refreshProcesses(activeTab.id, serial)
@@ -2829,6 +2898,7 @@ function App() {
     activeTab.loadingProcessesBySerial,
     activeTab.processesBySerial,
     activeTab.selectedSerials,
+    activeTab.source,
     refreshProcesses,
   ])
 
@@ -2839,6 +2909,7 @@ function App() {
       loadingDevices ||
       !adbInfo?.available ||
       onlineDevices.length === 0 ||
+      activeTab.source === 'imported' ||
       startingTabId === activeTab.id ||
       activeTab.sessions.some((session) => session.running) ||
       activeTab.selectedSerials.length === 0
@@ -2852,6 +2923,7 @@ function App() {
     activeTab.id,
     activeTab.selectedSerials,
     activeTab.sessions,
+    activeTab.source,
     adbInfo?.available,
     isDetachedWindow,
     loadingDevices,
@@ -2864,6 +2936,7 @@ function App() {
     const pendingTab = tabs.find(
       (tab) =>
         tab.restoreSessionRunning &&
+        tab.source === 'live' &&
         !tab.sessions.some((session) => session.running) &&
         startingTabId !== tab.id,
     )
@@ -2886,7 +2959,11 @@ function App() {
       searchOptions: activeTab.searchOptions,
       tags: activeTab.selectedTags,
       devices: activeTab.selectedSerials.length > 0 ? activeTab.selectedSerials : ['__no_device_selected__'],
-      pidDeviceKeys: packagePidDeviceKeys(activeProcesses, activeTab.selectedPackages),
+      applicationIds: activeTab.source === 'imported' ? activeTab.selectedPackages : [],
+      pidDeviceKeys:
+        activeTab.source === 'imported'
+          ? []
+          : packagePidDeviceKeys(activeProcesses, activeTab.selectedPackages),
     })
   }, [
     activeTab.id,
@@ -2896,6 +2973,7 @@ function App() {
     activeTab.selectedLevels,
     activeTab.selectedSerials,
     activeTab.selectedTags,
+    activeTab.source,
     activeTab.store,
     activeProcesses,
     resetLogWindowForTab,
@@ -3289,6 +3367,8 @@ function App() {
               )}
               {detachingTabId === tab.id ? (
                 <small>分离中</small>
+              ) : tab.source === 'imported' ? (
+                <small>离线</small>
               ) : tab.sessions.some((session) => session.running) ? (
                 <small>{tab.paused ? '暂停' : `运行 ${tab.sessions.length}`}</small>
               ) : null}
@@ -3332,7 +3412,7 @@ function App() {
             </button>
             <div>
               <h1>{activeTab.title}</h1>
-              <p>{selectedDeviceSummary(activeTab.selectedSerials, onlineDevices)}</p>
+              <p>{selectedDeviceSummary(activeTab.selectedSerials, activeDeviceOptions)}</p>
             </div>
           </div>
           <div className="toolbar-metrics" aria-label="日志状态">
@@ -3353,11 +3433,11 @@ function App() {
                 {returningToMain ? '回归中' : '回归主窗'}
               </button>
             ) : null}
-            <button disabled={!hasSelectedDevice || isStarting} onClick={handleStartPause}>
+            <button disabled={!canControlLogcat || isStarting} onClick={handleStartPause}>
               {isRunning && !activeTab.paused ? <Pause size={16} /> : <Play size={16} />}
-              {!isRunning ? (isStarting ? '启动中' : '开始') : activeTab.paused ? '继续' : '暂停'}
+              {startPauseLabel}
             </button>
-            <button disabled={!hasSelectedDevice || isStarting} onClick={handleRestart}>
+            <button disabled={!canControlLogcat || isStarting} onClick={handleRestart}>
               <RotateCcw size={16} />
               Restart
             </button>
@@ -3441,7 +3521,7 @@ function App() {
               }}
             >
               <Usb size={16} />
-              {deviceFilterLabel(activeTab.selectedSerials, onlineDevices)}
+              {deviceFilterLabel(activeTab.selectedSerials, activeDeviceOptions)}
             </button>
             {deviceMenuOpen ? (
               <div className="filter-popover filter-popover-narrow">
@@ -3452,15 +3532,21 @@ function App() {
                   </button>
                 </div>
                 <div className="popover-actions">
-                  <span>{onlineDevices.length} 台在线设备</span>
-                  <button disabled={loadingDevices} onClick={refreshDevices}>
-                    <RefreshCcw size={16} />
-                    {loadingDevices ? '刷新中' : '刷新'}
-                  </button>
+                  <span>
+                    {activeTab.source === 'imported'
+                      ? `${activeDeviceOptions.length} 台离线设备`
+                      : `${activeDeviceOptions.length} 台在线设备`}
+                  </span>
+                  {activeTab.source === 'live' ? (
+                    <button disabled={loadingDevices} onClick={refreshDevices}>
+                      <RefreshCcw size={16} />
+                      {loadingDevices ? '刷新中' : '刷新'}
+                    </button>
+                  ) : null}
                 </div>
                 <div className="filter-option-list">
-                  {onlineDevices.length > 0 ? (
-                    onlineDevices.map((device) => {
+                  {activeDeviceOptions.length > 0 ? (
+                    activeDeviceOptions.map((device) => {
                       const checked = selectedSerialSet.has(device.serial)
                       const locked = checked && activeTab.selectedSerials.length <= 1
                       return (
@@ -3479,7 +3565,9 @@ function App() {
                       )
                     })
                   ) : (
-                    <div className="popover-empty">未连接可用设备</div>
+                    <div className="popover-empty">
+                      {activeTab.source === 'imported' ? '导入文件没有设备信息' : '未连接可用设备'}
+                    </div>
                   )}
                 </div>
               </div>
@@ -3529,18 +3617,20 @@ function App() {
                   </button>
                 </div>
                 <div className="popover-actions">
-                  <span>{packages.length} 个进程</span>
-                  <button
-                    disabled={activeTab.selectedSerials.length === 0 || loadingProcesses}
-                    onClick={() => {
-                      for (const serial of activeTab.selectedSerials) {
-                        void refreshProcesses(activeTab.id, serial)
-                      }
-                    }}
-                  >
-                    <RefreshCcw size={16} />
-                    {loadingProcesses ? '读取中' : '刷新'}
-                  </button>
+                  <span>{packages.length} 个{activeTab.source === 'imported' ? '包名' : '进程'}</span>
+                  {activeTab.source === 'live' ? (
+                    <button
+                      disabled={activeTab.selectedSerials.length === 0 || loadingProcesses}
+                      onClick={() => {
+                        for (const serial of activeTab.selectedSerials) {
+                          void refreshProcesses(activeTab.id, serial)
+                        }
+                      }}
+                    >
+                      <RefreshCcw size={16} />
+                      {loadingProcesses ? '读取中' : '刷新'}
+                    </button>
+                  ) : null}
                 </div>
                 {processError ? <span className="inline-error">{processError}</span> : null}
                 <div className="filter-option-list">
@@ -3561,7 +3651,7 @@ function App() {
                           <span>
                             <strong>{process.name}</strong>
                             <small>
-                              pid {process.pidLabel}
+                              {activeTab.source === 'imported' ? '离线日志' : `pid ${process.pidLabel}`}
                               {process.serials.length > 1 ? ` · ${process.serials.length} 台设备` : ''}
                             </small>
                           </span>
@@ -3569,7 +3659,9 @@ function App() {
                       )
                     })
                   ) : (
-                    <div className="popover-empty">没有匹配进程</div>
+                    <div className="popover-empty">
+                      {activeTab.source === 'imported' ? '没有匹配包名' : '没有匹配进程'}
+                    </div>
                   )}
                 </div>
               </div>
