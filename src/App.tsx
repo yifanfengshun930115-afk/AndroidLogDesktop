@@ -36,6 +36,7 @@ import {
   type CSSProperties,
   type DragEvent as ReactDragEvent,
   type FormEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -55,6 +56,7 @@ import {
   stopLogcat,
 } from './api/logcat'
 import { clearTabTransfer, putTabTransfer, takeTabTransfer } from './api/tabTransfer'
+import appIconUrl from '../src-tauri/icons/128x128.png'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
 import { LogStore, logStore, type SerializedLogEntry } from './logStore'
@@ -86,6 +88,7 @@ interface LogTab {
   selectedTags: string[]
   selectedPackages: string[]
   visibleLogFields: LogField[]
+  columnWidths: LogColumnWidths
   searchOptions: LogSearchOptions
   findText: string
   findOptions: LogSearchOptions
@@ -97,6 +100,7 @@ interface LogTab {
 
 type LogColorScheme = 'android-studio' | 'idea' | 'vscode'
 type LogField = 'time' | 'level' | 'process' | 'tag' | 'message'
+type LogColumnWidths = Partial<Record<LogField, number>>
 
 interface TabTransferPayload {
   schemaVersion: 1
@@ -110,6 +114,7 @@ interface TabTransferPayload {
   selectedTags: string[]
   selectedPackages: string[]
   visibleLogFields: LogField[]
+  columnWidths: LogColumnWidths
   searchOptions: LogSearchOptions
   findText?: string
   findOptions?: LogSearchOptions
@@ -153,6 +158,7 @@ interface PersistedLogTabState {
   selectedTags: string[]
   selectedPackages: string[]
   visibleLogFields: LogField[]
+  columnWidths: LogColumnWidths
   searchOptions: LogSearchOptions
   findText: string
   findOptions: LogSearchOptions
@@ -213,12 +219,12 @@ const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
 const APP_CLOSE_REQUESTED_EVENT = 'app://close-requested'
 
-const LOG_FIELD_COLUMNS: Record<LogField, { nowrap: string; wrap: string; minWidth: number }> = {
-  time: { nowrap: '150px', wrap: '150px', minWidth: 150 },
-  level: { nowrap: '88px', wrap: '88px', minWidth: 88 },
-  process: { nowrap: '96px', wrap: '96px', minWidth: 96 },
-  tag: { nowrap: '180px', wrap: '180px', minWidth: 180 },
-  message: { nowrap: 'minmax(520px, max-content)', wrap: 'minmax(260px, 1fr)', minWidth: 520 },
+const LOG_FIELD_COLUMNS: Record<LogField, { defaultWidth: number; minWidth: number; maxWidth: number }> = {
+  time: { defaultWidth: 150, minWidth: 96, maxWidth: 320 },
+  level: { defaultWidth: 88, minWidth: 72, maxWidth: 180 },
+  process: { defaultWidth: 96, minWidth: 72, maxWidth: 220 },
+  tag: { defaultWidth: 180, minWidth: 96, maxWidth: 520 },
+  message: { defaultWidth: 520, minWidth: 260, maxWidth: 2400 },
 }
 
 function createLogTab(index: number, selectedSerial = ''): LogTab {
@@ -234,6 +240,7 @@ function createLogTab(index: number, selectedSerial = ''): LogTab {
     selectedTags: [],
     selectedPackages: [],
     visibleLogFields: [...DEFAULT_LOG_FIELDS],
+    columnWidths: {},
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS },
     findText: '',
     findOptions: { ...DEFAULT_SEARCH_OPTIONS },
@@ -274,6 +281,26 @@ function normalizeLogLevels(value: unknown): LogLevel[] {
   return stringList(value).filter((level): level is LogLevel => allowedLevels.has(level as LogLevel))
 }
 
+function clampLogColumnWidth(field: LogField, width: number) {
+  const column = LOG_FIELD_COLUMNS[field]
+  return clampNumber(Math.round(width), column.minWidth, column.maxWidth)
+}
+
+function logColumnWidth(field: LogField, widths: LogColumnWidths) {
+  return clampLogColumnWidth(field, widths[field] ?? LOG_FIELD_COLUMNS[field].defaultWidth)
+}
+
+function normalizeLogColumnWidths(value: unknown): LogColumnWidths {
+  const data = isRecord(value) ? value : {}
+  return DEFAULT_LOG_FIELDS.reduce<LogColumnWidths>((widths, field) => {
+    const rawWidth = Number(data[field])
+    if (Number.isFinite(rawWidth)) {
+      widths[field] = clampLogColumnWidth(field, rawWidth)
+    }
+    return widths
+  }, {})
+}
+
 function normalizePersistedTabState(value: unknown, index: number): PersistedLogTabState {
   const data = isRecord(value) ? value : {}
   return {
@@ -287,6 +314,7 @@ function normalizePersistedTabState(value: unknown, index: number): PersistedLog
     selectedTags: stringList(data.selectedTags),
     selectedPackages: stringList(data.selectedPackages),
     visibleLogFields: normalizeLogFields(stringList(data.visibleLogFields) as LogField[]),
+    columnWidths: normalizeLogColumnWidths(data.columnWidths),
     searchOptions: normalizeSearchOptions(isRecord(data.searchOptions) ? data.searchOptions : undefined),
     findText: typeof data.findText === 'string' ? data.findText : '',
     findOptions: normalizeSearchOptions(isRecord(data.findOptions) ? data.findOptions : undefined),
@@ -350,6 +378,7 @@ function createLogTabFromPersistedState(state: PersistedLogTabState, index: numb
     selectedTags: [...state.selectedTags],
     selectedPackages: [...state.selectedPackages],
     visibleLogFields: normalizeLogFields(state.visibleLogFields),
+    columnWidths: normalizeLogColumnWidths(state.columnWidths),
     searchOptions: { ...state.searchOptions },
     findText: state.findText,
     findOptions: { ...state.findOptions },
@@ -458,6 +487,7 @@ function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTrans
     selectedTags: [...tab.selectedTags],
     selectedPackages: [...tab.selectedPackages],
     visibleLogFields: normalizeLogFields(tab.visibleLogFields),
+    columnWidths: normalizeLogColumnWidths(tab.columnWidths),
     searchOptions: { ...tab.searchOptions },
     findText: tab.findText,
     findOptions: { ...tab.findOptions },
@@ -509,6 +539,7 @@ function createTabFromTransferPayload(payload: TabTransferPayload, existingIds =
     selectedTags: payload.selectedTags ?? [],
     selectedPackages: payload.selectedPackages ?? [],
     visibleLogFields: normalizeLogFields(payload.visibleLogFields ?? DEFAULT_LOG_FIELDS),
+    columnWidths: normalizeLogColumnWidths(payload.columnWidths),
     searchOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.searchOptions },
     findText: payload.findText ?? '',
     findOptions: { ...DEFAULT_SEARCH_OPTIONS, ...payload.findOptions },
@@ -632,15 +663,20 @@ function levelFilterLabel(selectedLevels: LogLevel[]) {
   return `Level ${selectedLevels.length}`
 }
 
-function buildLogGridColumns(fields: LogField[], softWrap: boolean) {
-  return fields.map((field) => LOG_FIELD_COLUMNS[field][softWrap ? 'wrap' : 'nowrap']).join(' ')
+function buildLogGridColumns(fields: LogField[], softWrap: boolean, widths: LogColumnWidths) {
+  return fields
+    .map((field) => {
+      const width = logColumnWidth(field, widths)
+      if (field === 'message') {
+        return `minmax(${width}px, ${softWrap ? '1fr' : 'max-content'})`
+      }
+      return `${width}px`
+    })
+    .join(' ')
 }
 
-function buildLogMinWidth(fields: LogField[], softWrap: boolean) {
-  if (softWrap) {
-    return '0px'
-  }
-  const minWidth = fields.reduce((sum, field) => sum + LOG_FIELD_COLUMNS[field].minWidth, 0)
+function buildLogMinWidth(fields: LogField[], widths: LogColumnWidths) {
+  const minWidth = fields.reduce((sum, field) => sum + logColumnWidth(field, widths), 0)
   return `${Math.max(minWidth, 260)}px`
 }
 
@@ -684,6 +720,7 @@ function serializeTabForPersistence(tab: LogTab): PersistedLogTabState {
     selectedTags: [...tab.selectedTags],
     selectedPackages: [...tab.selectedPackages],
     visibleLogFields: normalizeLogFields(tab.visibleLogFields),
+    columnWidths: normalizeLogColumnWidths(tab.columnWidths),
     searchOptions: { ...tab.searchOptions },
     findText: tab.findText,
     findOptions: { ...tab.findOptions },
@@ -767,6 +804,7 @@ function App() {
   const [findBarOpen, setFindBarOpen] = useState(initialAppState.findBarOpen)
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
   const [closingApp, setClosingApp] = useState(false)
+  const [resizingLogField, setResizingLogField] = useState<LogField | ''>('')
   const [logWindowStarts, setLogWindowStarts] = useState<Record<string, number>>({})
   const [tabs, setTabs] = useState<LogTab[]>(initialAppState.tabs)
   const [activeTabId, setActiveTabId] = useState(initialAppState.activeTabId)
@@ -780,6 +818,12 @@ function App() {
   const logListRef = useRef<HTMLDivElement>(null)
   const logScrollTopByTabRef = useRef<Record<string, number>>({})
   const pendingLogScrollRef = useRef<'top' | 'bottom'>()
+  const columnResizeRef = useRef<{
+    tabId: string
+    field: LogField
+    startX: number
+    startWidth: number
+  }>()
   const logSchemeSelectRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
@@ -912,12 +956,16 @@ function App() {
   const logLayoutStyle = useMemo(
     () =>
       ({
-        '--log-grid-columns': buildLogGridColumns(activeTab.visibleLogFields, activeTab.softWrap),
-        '--log-min-width': buildLogMinWidth(activeTab.visibleLogFields, activeTab.softWrap),
+        '--log-grid-columns': buildLogGridColumns(
+          activeTab.visibleLogFields,
+          activeTab.softWrap,
+          activeTab.columnWidths,
+        ),
+        '--log-min-width': buildLogMinWidth(activeTab.visibleLogFields, activeTab.columnWidths),
         '--log-font-size': `${logFontSize}px`,
         '--log-row-padding': `${logRowPadding}px`,
       }) as CSSProperties,
-    [activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
+    [activeTab.columnWidths, activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
   )
 
   const setActiveLogWindowStart = useCallback(
@@ -1207,6 +1255,64 @@ function App() {
     (updater: (tab: LogTab) => LogTab) => updateTab(activeTabId, updater),
     [activeTabId, updateTab],
   )
+
+  const beginResizeLogColumn = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>, field: LogField) => {
+      event.preventDefault()
+      event.stopPropagation()
+      columnResizeRef.current = {
+        tabId: activeTab.id,
+        field,
+        startX: event.clientX,
+        startWidth: logColumnWidth(field, activeTab.columnWidths),
+      }
+      setResizingLogField(field)
+    },
+    [activeTab.columnWidths, activeTab.id],
+  )
+
+  useEffect(() => {
+    if (!resizingLogField) {
+      return undefined
+    }
+
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = columnResizeRef.current
+      if (!drag) {
+        return
+      }
+
+      const nextWidth = drag.startWidth + event.clientX - drag.startX
+      updateTab(drag.tabId, (tab) => ({
+        ...tab,
+        columnWidths: {
+          ...tab.columnWidths,
+          [drag.field]: clampLogColumnWidth(drag.field, nextWidth),
+        },
+      }))
+    }
+
+    const stopResize = () => {
+      columnResizeRef.current = undefined
+      setResizingLogField('')
+    }
+
+    document.addEventListener('pointermove', handlePointerMove)
+    document.addEventListener('pointerup', stopResize, { once: true })
+    document.addEventListener('pointercancel', stopResize, { once: true })
+    return () => {
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+      document.removeEventListener('pointermove', handlePointerMove)
+      document.removeEventListener('pointerup', stopResize)
+      document.removeEventListener('pointercancel', stopResize)
+    }
+  }, [resizingLogField, updateTab])
 
   const showToast = useCallback((message: ToastMessage) => {
     if (toastTimerRef.current) {
@@ -1905,7 +2011,7 @@ function App() {
       {drawerOpen ? <button className="drawer-backdrop" onClick={() => setDrawerOpen(false)} /> : null}
       <aside className={`drawer ${drawerOpen ? 'open' : ''}`}>
         <div className="brand">
-          <span className="brand-mark">AL</span>
+          <img className="brand-icon" src={appIconUrl} alt="" />
           <div>
             <strong>Android Log</strong>
             <span>Desktop</span>
@@ -2596,9 +2702,20 @@ function App() {
           <div className="log-scroll-frame" onScroll={handleLogScroll} ref={logListRef}>
             <div className="log-table">
               <div className="log-header">
-                {activeTab.visibleLogFields.map((field) => (
-                  <span key={field}>{LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label}</span>
-                ))}
+                {activeTab.visibleLogFields.map((field) => {
+                  const label = LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label ?? field
+                  return (
+                    <span className="log-header-cell" key={field}>
+                      <span className="log-header-label">{label}</span>
+                      <button
+                        aria-label={`调整${label}列宽`}
+                        className={`column-resizer ${resizingLogField === field ? 'active' : ''}`}
+                        onPointerDown={(event) => beginResizeLogColumn(event, field)}
+                        type="button"
+                      />
+                    </span>
+                  )
+                })}
               </div>
               {visibleLogs.length > 0 ? (
                 <div className="log-list">
