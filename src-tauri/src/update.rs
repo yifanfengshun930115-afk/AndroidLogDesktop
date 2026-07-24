@@ -82,6 +82,29 @@ struct DownloadedUpdateAsset {
     total_bytes: Option<u64>,
 }
 
+struct PartialDownloadGuard {
+    path: PathBuf,
+    active: bool,
+}
+
+impl PartialDownloadGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PartialDownloadGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn check_for_updates() -> UpdateCheckResult {
     match tauri::async_runtime::spawn_blocking(build_update_check_result).await {
@@ -338,10 +361,12 @@ fn download_update_asset(
 ) -> Result<DownloadedUpdateAsset, String> {
     let file_name = update_download_file_name(download_url, asset_name.as_deref())?;
     let update_dir = env::temp_dir().join("android-log-desktop-updates");
+    cleanup_update_download_dir(&update_dir);
     fs::create_dir_all(&update_dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
     let destination = update_dir.join(file_name);
     let partial_destination = destination.with_extension("download");
     let _ = fs::remove_file(&partial_destination);
+    let mut partial_guard = PartialDownloadGuard::new(partial_destination.clone());
 
     emit_update_progress(
         app,
@@ -400,6 +425,7 @@ fn download_update_asset(
         .map_err(|error| format!("写入安装包失败：{error}"))?;
     fs::rename(&partial_destination, &destination)
         .map_err(|error| format!("保存安装包失败：{error}"))?;
+    partial_guard.disarm();
 
     emit_update_progress(
         app,
@@ -416,6 +442,19 @@ fn download_update_asset(
         downloaded_bytes,
         total_bytes: total_bytes.or(Some(downloaded_bytes)),
     })
+}
+
+fn cleanup_update_download_dir(update_dir: &Path) {
+    let Ok(entries) = fs::read_dir(update_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let _ = fs::remove_dir(update_dir);
 }
 
 fn emit_download_progress(
@@ -563,10 +602,16 @@ fn macos_install_script(dmg_path: &Path, app_path: &Path) -> String {
 set -eu
 DMG_PATH={dmg_path}
 APP_PATH={app_path}
+SCRIPT_PATH="$0"
+INSTALL_SUCCEEDED=0
 MOUNT_DIR="$(mktemp -d "${{TMPDIR:-/tmp/}}android-log-desktop-update.XXXXXX")"
 cleanup() {{
   hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
   rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+  if [ "$INSTALL_SUCCEEDED" = "1" ]; then
+    rm -f "$DMG_PATH" "$SCRIPT_PATH" >/dev/null 2>&1 || true
+    rmdir "$(dirname "$DMG_PATH")" >/dev/null 2>&1 || true
+  fi
 }}
 trap cleanup EXIT
 hdiutil attach -nobrowse -quiet -readonly -mountpoint "$MOUNT_DIR" "$DMG_PATH"
@@ -578,7 +623,8 @@ while pgrep -x android-log-desktop >/dev/null 2>&1; do
   sleep 0.3
 done
 ditto "$SOURCE_APP" "$APP_PATH"
-open "$APP_PATH"
+INSTALL_SUCCEEDED=1
+open "$APP_PATH" >/dev/null 2>&1 || true
 "#,
         dmg_path = shell_single_quote(&dmg_path.to_string_lossy()),
         app_path = shell_single_quote(&app_path.to_string_lossy()),
@@ -587,14 +633,55 @@ open "$APP_PATH"
 
 #[cfg(target_os = "windows")]
 fn launch_windows_update_installer(file_path: &Path) -> Result<(), String> {
-    let mut command = hidden_command(&file_path.to_string_lossy());
+    let script_path = env::temp_dir().join(format!(
+        "install-android-log-desktop-{}.cmd",
+        std::process::id()
+    ));
+    let script = windows_install_script(file_path);
+    fs::write(&script_path, script).map_err(|error| format!("创建安装脚本失败：{error}"))?;
+    let mut command = hidden_command("cmd");
     command
+        .arg("/C")
+        .arg("call")
+        .arg(&script_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("启动 Windows 安装程序失败：{error}"))
+        .map_err(|error| format!("启动 Windows 安装脚本失败：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_install_script(file_path: &Path) -> String {
+    let update_dir = file_path
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    format!(
+        r#"@echo off
+setlocal
+set "INSTALLER={installer}"
+set "UPDATE_DIR={update_dir}"
+:wait_app
+tasklist /FI "IMAGENAME eq android-log-desktop.exe" 2>NUL | find /I "android-log-desktop.exe" >NUL
+if not errorlevel 1 (
+  timeout /T 1 /NOBREAK >NUL
+  goto wait_app
+)
+start "" /WAIT "%INSTALLER%"
+del /F /Q "%INSTALLER%" >NUL 2>NUL
+rmdir "%UPDATE_DIR%" >NUL 2>NUL
+del /F /Q "%~f0" >NUL 2>NUL
+"#,
+        installer = windows_batch_value(&file_path.to_string_lossy()),
+        update_dir = windows_batch_value(&update_dir),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_batch_value(value: &str) -> String {
+    value.replace('%', "%%")
 }
 
 #[cfg(target_os = "linux")]
@@ -604,6 +691,9 @@ fn launch_linux_update_installer(file_path: &Path) -> Result<(), String> {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if extension == "deb" {
+        return launch_linux_package_with_cleanup(file_path);
+    }
     if extension == "appimage" {
         #[cfg(unix)]
         {
@@ -617,6 +707,43 @@ fn launch_linux_update_installer(file_path: &Path) -> Result<(), String> {
         }
     }
     open_path(file_path)
+}
+
+#[cfg(target_os = "linux")]
+fn launch_linux_package_with_cleanup(file_path: &Path) -> Result<(), String> {
+    let script_path = env::temp_dir().join(format!(
+        "install-android-log-desktop-{}.sh",
+        std::process::id()
+    ));
+    let script = linux_cleanup_script(file_path, 30 * 60);
+    fs::write(&script_path, script).map_err(|error| format!("创建安装脚本失败：{error}"))?;
+    let mut command = Command::new("sh");
+    command
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动安装脚本失败：{error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cleanup_script(file_path: &Path, cleanup_delay_seconds: u64) -> String {
+    format!(
+        r#"#!/bin/sh
+set -u
+PACKAGE_PATH={package_path}
+SCRIPT_PATH="$0"
+xdg-open "$PACKAGE_PATH" >/dev/null 2>&1 || true
+sleep {cleanup_delay_seconds}
+rm -f "$PACKAGE_PATH" >/dev/null 2>&1 || true
+rmdir "$(dirname "$PACKAGE_PATH")" >/dev/null 2>&1 || true
+rm -f "$SCRIPT_PATH" >/dev/null 2>&1 || true
+"#,
+        package_path = shell_single_quote(&file_path.to_string_lossy()),
+        cleanup_delay_seconds = cleanup_delay_seconds,
+    )
 }
 
 fn open_path(path: &Path) -> Result<(), String> {
@@ -1015,5 +1142,81 @@ mod tests {
             .as_deref(),
             Ok("Android Log Desktop_0.1.2_aarch64.dmg")
         );
+    }
+
+    #[test]
+    fn cleanup_update_download_dir_removes_stale_files() {
+        let dir = env::temp_dir().join(format!(
+            "android-log-desktop-cleanup-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        let old_package = dir.join("old.dmg");
+        let old_script = dir.join("install.cmd");
+        fs::write(&old_package, "package").expect("old package should be written");
+        fs::write(&old_script, "script").expect("old script should be written");
+
+        cleanup_update_download_dir(&dir);
+
+        assert!(!old_package.exists());
+        assert!(!old_script.exists());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn partial_download_guard_removes_failed_partial_file() {
+        let dir = env::temp_dir().join(format!(
+            "android-log-desktop-partial-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        let partial = dir.join("package.download");
+        fs::write(&partial, "partial").expect("partial package should be written");
+
+        {
+            let _guard = PartialDownloadGuard::new(partial.clone());
+        }
+
+        assert!(!partial.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_install_script_removes_update_artifacts_after_success() {
+        let script = macos_install_script(
+            Path::new("/tmp/android-log-desktop-updates/app.dmg"),
+            Path::new("/Applications/Android Log Desktop.app"),
+        );
+
+        assert!(script.contains("INSTALL_SUCCEEDED=1"));
+        assert!(script.contains("rm -f \"$DMG_PATH\" \"$SCRIPT_PATH\""));
+        assert!(script.contains("rmdir \"$(dirname \"$DMG_PATH\")\""));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_cleanup_script_removes_package_after_delay() {
+        let script = linux_cleanup_script(Path::new("/tmp/android-log-desktop-updates/app.deb"), 1);
+
+        assert!(script.contains("sleep 1"));
+        assert!(script.contains("rm -f \"$PACKAGE_PATH\""));
+        assert!(script.contains("rmdir \"$(dirname \"$PACKAGE_PATH\")\""));
+        assert!(script.contains("rm -f \"$SCRIPT_PATH\""));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_install_script_removes_installer_after_wait() {
+        let script = windows_install_script(Path::new(
+            "C:\\Temp\\android-log-desktop-updates\\app-setup.exe",
+        ));
+
+        assert!(script.contains("start \"\" /WAIT \"%INSTALLER%\""));
+        assert!(script.contains("del /F /Q \"%INSTALLER%\""));
+        assert!(script.contains("rmdir \"%UPDATE_DIR%\""));
+        assert!(script.contains("del /F /Q \"%~f0\""));
     }
 }
