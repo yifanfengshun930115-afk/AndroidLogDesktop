@@ -36,6 +36,7 @@ import {
   type CSSProperties,
   type DragEvent as ReactDragEvent,
   type FormEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -56,6 +57,7 @@ import {
   stopLogcat,
 } from './api/logcat'
 import { clearTabTransfer, putTabTransfer, takeTabTransfer } from './api/tabTransfer'
+import { checkForUpdates as checkForAppUpdatesCommand, openExternalUrl } from './api/update'
 import appIconUrl from '../src-tauri/icons/128x128.png'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
@@ -71,8 +73,11 @@ import type {
   AdbDevice,
   AdbInfo,
   AdbProcessInfo,
+  ExternalOpenResult,
+  LogEntry,
   LogLevel,
   LogcatSessionInfo,
+  UpdateCheckResult,
 } from './types'
 
 interface LogTab {
@@ -161,6 +166,27 @@ interface ToastMessage {
   message?: string
 }
 
+type UpdateCheckStatus = 'idle' | 'checking' | 'current' | 'available' | 'error'
+
+interface UpdateCheckState {
+  status: UpdateCheckStatus
+  currentVersion?: string
+  latestVersion?: string
+  releaseUrl?: string
+  assetName?: string
+  assetDownloadUrl?: string
+  assetSizeBytes?: number
+  checkedAtEpochMs?: number
+  message: string
+}
+
+interface CellCopyMenu {
+  x: number
+  y: number
+  label: string
+  text: string
+}
+
 interface PersistedLogTabState {
   id: string
   title: string
@@ -237,6 +263,7 @@ const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
 const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
 const APP_CLOSE_REQUESTED_EVENT = 'app://close-requested'
+const RELEASE_PAGE_URL = 'https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/latest'
 
 const LOG_FIELD_COLUMNS: Record<LogField, { defaultWidth: number; minWidth: number; maxWidth: number }> = {
   device: { defaultWidth: 170, minWidth: 112, maxWidth: 420 },
@@ -923,6 +950,95 @@ function levelFilterLabel(selectedLevels: LogLevel[]) {
   return `Level ${selectedLevels.length}`
 }
 
+function logFieldLabel(field: LogField) {
+  return LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label ?? field
+}
+
+function logCellText(field: LogField, entry: LogEntry, devices: AdbDevice[]) {
+  if (field === 'device') {
+    return deviceLabelForSerial(entry.deviceSerial, devices)
+  }
+  if (field === 'time') {
+    return entry.timestamp || '-'
+  }
+  if (field === 'level') {
+    return LOG_LEVEL_LABELS[entry.level]
+  }
+  if (field === 'process') {
+    return entry.pid || '-'
+  }
+  if (field === 'tag') {
+    return entry.tag || '-'
+  }
+  return entry.message
+}
+
+function displayVersion(version?: string) {
+  return version ? `v${version.replace(/^v/i, '')}` : '-'
+}
+
+function formatBytes(sizeBytes?: number) {
+  if (!sizeBytes || sizeBytes < 0) {
+    return ''
+  }
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = sizeBytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const fractionDigits = value >= 10 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`
+}
+
+function formatCheckedTime(epochMs?: number) {
+  if (!epochMs) {
+    return ''
+  }
+  return new Date(epochMs).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function updateStatusTitle(status: UpdateCheckStatus) {
+  if (status === 'checking') {
+    return '正在检查更新'
+  }
+  if (status === 'available') {
+    return '发现新版本'
+  }
+  if (status === 'current') {
+    return '当前已是最新版本'
+  }
+  if (status === 'error') {
+    return '更新检查失败'
+  }
+  return '自动检查更新'
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  const copied = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  if (!copied) {
+    throw new Error('系统剪贴板不可用')
+  }
+}
+
 function buildLogGridColumns(fields: LogField[], softWrap: boolean, widths: LogColumnWidths) {
   return fields
     .map((field) => {
@@ -1004,15 +1120,21 @@ function writePersistedAppState(state: PersistedAppState) {
 function HighlightedText({
   className,
   matcher,
+  onContextMenu,
   text,
 }: {
   className?: string
   matcher: CompiledSearchMatcher
+  onContextMenu?: (event: ReactMouseEvent<HTMLSpanElement>) => void
   text: string
 }) {
   const ranges = findSearchMatchRanges(text, matcher, 100)
   if (ranges.length === 0) {
-    return <span className={className}>{text}</span>
+    return (
+      <span className={className} onContextMenu={onContextMenu}>
+        {text}
+      </span>
+    )
   }
 
   const parts = []
@@ -1035,7 +1157,11 @@ function HighlightedText({
     parts.push(text.slice(cursor))
   }
 
-  return <span className={className}>{parts}</span>
+  return (
+    <span className={className} onContextMenu={onContextMenu}>
+      {parts}
+    </span>
+  )
 }
 
 function App() {
@@ -1049,6 +1175,12 @@ function App() {
   const [logError, setLogError] = useState('')
   const [isExporting, setIsExporting] = useState(false)
   const [toast, setToast] = useState<ToastMessage>()
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckState>({
+    status: 'idle',
+    releaseUrl: RELEASE_PAGE_URL,
+    message: '启动后会自动检查 GitHub Release。',
+  })
+  const [cellCopyMenu, setCellCopyMenu] = useState<CellCopyMenu>()
   const [drawerOpen, setDrawerOpen] = useState(initialAppState.drawerOpen)
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false)
   const [packageMenuOpen, setPackageMenuOpen] = useState(false)
@@ -1079,7 +1211,9 @@ function App() {
   const tabsRef = useRef(tabs)
   const draggedTabIdRef = useRef('')
   const autoStartPendingRef = useRef(!isDetachedWindow)
+  const updateAutoCheckStartedRef = useRef(false)
   const toastTimerRef = useRef<number>()
+  const cellCopyMenuRef = useRef<HTMLDivElement>(null)
   const tabTitleInputRef = useRef<HTMLInputElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
   const logListRef = useRef<HTMLDivElement>(null)
@@ -1509,9 +1643,35 @@ function App() {
     setTagSearch('')
     setContentMenuOpen(false)
     setLogSchemeMenuOpen(false)
+    setCellCopyMenu(undefined)
     setEditingTabId('')
     setEditingTabTitle('')
   }, [activeTabId])
+
+  useEffect(() => {
+    if (!cellCopyMenu) {
+      return undefined
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && cellCopyMenuRef.current?.contains(event.target)) {
+        return
+      }
+      setCellCopyMenu(undefined)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setCellCopyMenu(undefined)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [cellCopyMenu])
 
   useEffect(() => {
     if (
@@ -1660,6 +1820,163 @@ function App() {
     setToast(message)
     toastTimerRef.current = window.setTimeout(() => setToast(undefined), 3600)
   }, [])
+
+  const checkForUpdates = useCallback(
+    async (manual = true) => {
+      setUpdateCheck((current) => ({
+        ...current,
+        status: 'checking',
+        message: manual ? '正在从 GitHub Release 获取最新版本。' : '正在自动检查 GitHub Release。',
+      }))
+
+      try {
+        const result: UpdateCheckResult = await checkForAppUpdatesCommand()
+        const nextState: UpdateCheckState = {
+          status: result.ok ? (result.hasUpdate ? 'available' : 'current') : 'error',
+          currentVersion: result.currentVersion,
+          latestVersion: result.latestVersion,
+          releaseUrl: result.releaseUrl || RELEASE_PAGE_URL,
+          assetName: result.assetName,
+          assetDownloadUrl: result.assetDownloadUrl,
+          assetSizeBytes: result.assetSizeBytes,
+          checkedAtEpochMs: result.checkedAtEpochMs,
+          message: result.ok ? result.message : result.error ?? result.message,
+        }
+        setUpdateCheck(nextState)
+
+        if (!result.ok) {
+          if (manual) {
+            showToast({
+              id: Date.now(),
+              tone: 'danger',
+              title: '更新检查失败',
+              message: result.error ?? result.message,
+            })
+          }
+        } else if (result.hasUpdate) {
+          showToast({
+            id: Date.now(),
+            tone: 'success',
+            title: '发现新版本',
+            message: displayVersion(result.latestVersion),
+          })
+        } else if (manual) {
+          showToast({
+            id: Date.now(),
+            tone: 'success',
+            title: '当前已是最新版本',
+            message: displayVersion(result.currentVersion),
+          })
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setUpdateCheck((current) => ({
+          ...current,
+          status: 'error',
+          releaseUrl: current.releaseUrl ?? RELEASE_PAGE_URL,
+          checkedAtEpochMs: Date.now(),
+          message,
+        }))
+        if (manual) {
+          showToast({
+            id: Date.now(),
+            tone: 'danger',
+            title: '更新检查失败',
+            message,
+          })
+        }
+      }
+    },
+    [showToast],
+  )
+
+  const openUpdateUrl = useCallback(
+    async (url: string | undefined, successTitle: string) => {
+      if (!url) {
+        showToast({
+          id: Date.now(),
+          tone: 'danger',
+          title: '没有可打开的链接',
+        })
+        return
+      }
+
+      try {
+        const result: ExternalOpenResult = await openExternalUrl(url)
+        showToast({
+          id: Date.now(),
+          tone: result.ok ? 'success' : 'danger',
+          title: result.ok ? successTitle : '打开链接失败',
+          message: result.ok ? undefined : result.error ?? result.message,
+        })
+      } catch (error) {
+        showToast({
+          id: Date.now(),
+          tone: 'danger',
+          title: '打开链接失败',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+    [showToast],
+  )
+
+  const downloadUpdateAsset = useCallback(async () => {
+    if (!updateCheck.assetDownloadUrl) {
+      showToast({
+        id: Date.now(),
+        tone: 'danger',
+        title: '未找到适配安装包',
+        message: '请打开 Release 页面手动选择。',
+      })
+      return
+    }
+    await openUpdateUrl(updateCheck.assetDownloadUrl, '已打开安装包下载链接')
+  }, [openUpdateUrl, showToast, updateCheck.assetDownloadUrl])
+
+  const openReleasePage = useCallback(async () => {
+    await openUpdateUrl(updateCheck.releaseUrl ?? RELEASE_PAGE_URL, '已打开 Release 页面')
+  }, [openUpdateUrl, updateCheck.releaseUrl])
+
+  const openCellCopyMenu = useCallback(
+    (event: ReactMouseEvent<HTMLSpanElement>, label: string, text: string) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const menuWidth = 168
+      const menuHeight = 44
+      setCellCopyMenu({
+        x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+        y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+        label,
+        text,
+      })
+    },
+    [],
+  )
+
+  const copyCellText = useCallback(async () => {
+    if (!cellCopyMenu) {
+      return
+    }
+
+    try {
+      await copyTextToClipboard(cellCopyMenu.text)
+      showToast({
+        id: Date.now(),
+        tone: 'success',
+        title: `已复制${cellCopyMenu.label}`,
+      })
+    } catch (error) {
+      showToast({
+        id: Date.now(),
+        tone: 'danger',
+        title: '复制失败',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      setCellCopyMenu(undefined)
+    }
+  }, [cellCopyMenu, showToast])
 
   const beginRenameTab = useCallback((tab: LogTab) => {
     setEditingTabId(tab.id)
@@ -2268,6 +2585,14 @@ function App() {
   }, [refreshDevices])
 
   useEffect(() => {
+    if (isDetachedWindow || updateAutoCheckStartedRef.current) {
+      return
+    }
+    updateAutoCheckStartedRef.current = true
+    void checkForUpdates(false)
+  }, [checkForUpdates, isDetachedWindow])
+
+  useEffect(() => {
     for (const serial of activeTab.selectedSerials) {
       if (!activeTab.processesBySerial[serial] && !activeTab.loadingProcessesBySerial[serial]) {
         void refreshProcesses(activeTab.id, serial)
@@ -2409,6 +2734,9 @@ function App() {
     }
   }, [updateTab])
 
+  const updateChecking = updateCheck.status === 'checking'
+  const updateLastChecked = formatCheckedTime(updateCheck.checkedAtEpochMs)
+
   return (
     <main className="app-shell">
       {exitConfirmOpen ? (
@@ -2449,6 +2777,52 @@ function App() {
             <X size={16} />
           </button>
         </div>
+
+        <section className={`sidebar-section update-section update-${updateCheck.status}`}>
+          <p className="section-label">软件更新</p>
+          <div className="update-summary">
+            <span className="update-indicator" />
+            <div>
+              <strong>{updateStatusTitle(updateCheck.status)}</strong>
+              <span>{updateCheck.message}</span>
+            </div>
+          </div>
+          <div className="update-version-grid">
+            <div>
+              <span>当前版本</span>
+              <strong>{displayVersion(updateCheck.currentVersion)}</strong>
+            </div>
+            <div>
+              <span>最新版本</span>
+              <strong>{displayVersion(updateCheck.latestVersion)}</strong>
+            </div>
+          </div>
+          {updateCheck.assetName ? (
+            <p className="hint-text" title={updateCheck.assetName}>
+              适配包 {updateCheck.assetName}
+              {updateCheck.assetSizeBytes ? ` · ${formatBytes(updateCheck.assetSizeBytes)}` : ''}
+            </p>
+          ) : null}
+          {updateLastChecked ? <p className="hint-text">最近检查 {updateLastChecked}</p> : null}
+          <div className="utility-actions">
+            <button disabled={updateChecking} onClick={() => void checkForUpdates(true)} type="button">
+              <RefreshCcw size={15} />
+              {updateChecking ? '检查中' : '检查更新'}
+            </button>
+            <button
+              disabled={!updateCheck.assetDownloadUrl || updateCheck.status !== 'available'}
+              onClick={() => void downloadUpdateAsset()}
+              type="button"
+            >
+              <Download size={15} />
+              下载适配包
+            </button>
+            <button onClick={() => void openReleasePage()} type="button">
+              <ExternalLink size={15} />
+              Release 页面
+            </button>
+          </div>
+        </section>
 
         <section className="sidebar-section">
           <p className="section-label">外观</p>
@@ -3181,13 +3555,17 @@ function App() {
                   {visibleLogs.map((entry) => (
                     <div className={`log-row ${levelClass(entry.level)}-row`} key={entry.id}>
                       {activeTab.visibleLogFields.map((field) => {
+                        const text = logCellText(field, entry, devices)
+                        const handleCellContextMenu = (event: ReactMouseEvent<HTMLSpanElement>) =>
+                          openCellCopyMenu(event, logFieldLabel(field), text)
                         if (field === 'device') {
                           return (
                             <HighlightedText
                               className="log-device"
                               key={field}
                               matcher={activeFindMatcher}
-                              text={deviceLabelForSerial(entry.deviceSerial, devices)}
+                              onContextMenu={handleCellContextMenu}
+                              text={text}
                             />
                           )
                         }
@@ -3197,13 +3575,14 @@ function App() {
                               className="mono muted"
                               key={field}
                               matcher={activeFindMatcher}
-                              text={entry.timestamp || '-'}
+                              onContextMenu={handleCellContextMenu}
+                              text={text}
                             />
                           )
                         }
                         if (field === 'level') {
                           return (
-                            <span key={field}>
+                            <span key={field} onContextMenu={handleCellContextMenu}>
                               <span className={`level-badge ${levelClass(entry.level)}`}>
                                 {LOG_LEVEL_LABELS[entry.level]}
                               </span>
@@ -3216,7 +3595,8 @@ function App() {
                               className="mono muted"
                               key={field}
                               matcher={activeFindMatcher}
-                              text={entry.pid || '-'}
+                              onContextMenu={handleCellContextMenu}
+                              text={text}
                             />
                           )
                         }
@@ -3226,7 +3606,8 @@ function App() {
                               className="log-tag"
                               key={field}
                               matcher={activeFindMatcher}
-                              text={entry.tag || '-'}
+                              onContextMenu={handleCellContextMenu}
+                              text={text}
                             />
                           )
                         }
@@ -3235,7 +3616,8 @@ function App() {
                             className="log-message"
                             key={field}
                             matcher={activeFindMatcher}
-                            text={entry.message}
+                            onContextMenu={handleCellContextMenu}
+                            text={text}
                           />
                         )
                       })}
@@ -3252,6 +3634,18 @@ function App() {
           </div>
         </div>
       </section>
+      {cellCopyMenu ? (
+        <div
+          className="cell-copy-menu"
+          onContextMenu={(event) => event.preventDefault()}
+          ref={cellCopyMenuRef}
+          style={{ left: cellCopyMenu.x, top: cellCopyMenu.y }}
+        >
+          <button onClick={() => void copyCellText()} type="button">
+            复制{cellCopyMenu.label}
+          </button>
+        </div>
+      ) : null}
       {toast ? (
         <div className={`toast ${toast.tone}`} key={toast.id} role="status">
           {toast.tone === 'danger' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}

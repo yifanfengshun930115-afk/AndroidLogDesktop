@@ -75,3 +75,23 @@ export interface ExportResult {
   filePath: string
   sizeBytes: number
 }
+
+export interface UpdateCheckResult {
+  ok: boolean
+  currentVersion: string
+  latestVersion?: string
+  hasUpdate: boolean
+  releaseUrl: string
+  assetName?: string
+  assetDownloadUrl?: string
+  assetSizeBytes?: number
+  checkedAtEpochMs: number
+  message: string
+  error?: string
+}
+
+export interface ExternalOpenResult {
+  ok: boolean
+  message: string
+  error?: string
+}

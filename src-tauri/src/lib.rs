@@ -2,6 +2,7 @@ mod adb;
 mod export;
 mod logcat;
 mod transfer;
+mod update;
 
 use std::{thread, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder, WindowEvent};
@@ -84,7 +85,9 @@ pub fn run() {
             transfer::take_tab_transfer,
             close_app,
             logcat::start_logcat,
-            logcat::stop_logcat
+            logcat::stop_logcat,
+            update::check_for_updates,
+            update::open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
