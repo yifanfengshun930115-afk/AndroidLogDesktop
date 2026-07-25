@@ -927,16 +927,6 @@ function deviceFilterLabel(selectedSerials: string[], onlineDevices: AdbDevice[]
   return `设备 ${selectedSerials.length}/${onlineDevices.length}`
 }
 
-function selectedDeviceSummary(selectedSerials: string[], onlineDevices: AdbDevice[]) {
-  if (selectedSerials.length === 0) {
-    return '等待设备连接'
-  }
-  if (selectedSerials.length === 1) {
-    return deviceLabelForSerial(selectedSerials[0], onlineDevices)
-  }
-  return `${selectedSerials.length} 台设备`
-}
-
 function levelClass(level: LogLevel) {
   return `level-${level === '?' ? 'raw' : level.toLowerCase()}`
 }
@@ -3531,15 +3521,9 @@ function App() {
 
         <header className="toolbar">
           <div className="toolbar-summary">
-            <div className="title-row">
-              <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
-                <Menu size={18} />
-              </button>
-              <div>
-                <h1 title={activeTab.title}>{activeTab.title}</h1>
-                <p>{selectedDeviceSummary(activeTab.selectedSerials, activeDeviceOptions)}</p>
-              </div>
-            </div>
+            <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
+              <Menu size={18} />
+            </button>
             <div className="toolbar-metrics" aria-label="日志状态">
               <span>
                 缓存 <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
