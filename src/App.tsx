@@ -33,6 +33,7 @@ import {
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { useTranslation } from 'react-i18next'
 import {
   type CSSProperties,
   type ChangeEvent,
@@ -73,6 +74,16 @@ import {
 import appIconUrl from '../src-tauri/icons/128x128.png'
 import './App.css'
 import { LOG_LEVEL_LABELS } from './logcat'
+import {
+  applyLanguagePreference,
+  LANGUAGE_OPTIONS,
+  normalizeLanguagePreference,
+  readLanguagePreference,
+  translate,
+  writeLanguagePreference,
+  type LanguagePreference,
+} from './i18n'
+import { localizeBackendMessage } from './i18n/backend'
 import { createPidDeviceKey, LogStore, logStore, type SerializedLogEntry } from './logStore'
 import {
   compileSearchMatcher,
@@ -139,6 +150,7 @@ interface TabTransferPayload {
   title: string
   source?: LogTabSource
   theme?: 'light' | 'dark'
+  languagePreference?: LanguagePreference
   logColorScheme?: LogColorScheme
   logFontSize?: number
   logRowPadding?: number
@@ -172,6 +184,7 @@ interface TabTransferEventPayload {
 
 interface AppearanceEventPayload {
   theme: 'light' | 'dark'
+  languagePreference: LanguagePreference
   logColorScheme: LogColorScheme
   logFontSize: number
   logRowPadding: number
@@ -209,12 +222,16 @@ interface UpdateCheckState {
   assetSizeBytes?: number
   checkedAtEpochMs?: number
   message: string
+  messageKey?: string
+  messageArgs?: Record<string, unknown>
 }
 
 interface UpdateInstallState {
   open: boolean
   status: UpdateInstallStatus
   message: string
+  messageKey?: string
+  messageArgs?: Record<string, unknown>
   downloadedBytes: number
   totalBytes?: number
   percent?: number
@@ -267,23 +284,23 @@ const LOG_COLOR_SCHEME_LABELS: Record<LogColorScheme, string> = {
   vscode: 'VS Code',
 }
 
-const LOG_LEVEL_OPTIONS: Array<{ value: LogLevel; label: string; description: string }> = [
-  { value: 'F', label: 'Fatal', description: 'F / Assert，崩溃或严重失败' },
-  { value: 'E', label: 'Error', description: '错误' },
-  { value: 'W', label: 'Warn', description: '警告' },
-  { value: 'I', label: 'Info', description: '信息' },
-  { value: 'D', label: 'Debug', description: '调试' },
-  { value: 'V', label: 'Verbose', description: '最详细日志' },
-  { value: '?', label: 'Raw', description: '未匹配 threadtime 格式的原始行' },
+const LOG_LEVEL_OPTIONS: Array<{ value: LogLevel; labelKey: string; descriptionKey: string }> = [
+  { value: 'F', labelKey: 'level.fatal.label', descriptionKey: 'level.fatal.description' },
+  { value: 'E', labelKey: 'level.error.label', descriptionKey: 'level.error.description' },
+  { value: 'W', labelKey: 'level.warn.label', descriptionKey: 'level.warn.description' },
+  { value: 'I', labelKey: 'level.info.label', descriptionKey: 'level.info.description' },
+  { value: 'D', labelKey: 'level.debug.label', descriptionKey: 'level.debug.description' },
+  { value: 'V', labelKey: 'level.verbose.label', descriptionKey: 'level.verbose.description' },
+  { value: '?', labelKey: 'level.raw.label', descriptionKey: 'level.raw.description' },
 ]
 
-const LOG_FIELD_OPTIONS: Array<{ value: LogField; label: string; required?: boolean }> = [
-  { value: 'device', label: '设备' },
-  { value: 'time', label: '时间' },
-  { value: 'level', label: '级别' },
-  { value: 'process', label: 'PID' },
-  { value: 'tag', label: 'tag' },
-  { value: 'message', label: '内容', required: true },
+const LOG_FIELD_OPTIONS: Array<{ value: LogField; labelKey: string; required?: boolean }> = [
+  { value: 'device', labelKey: 'fields.device' },
+  { value: 'time', labelKey: 'fields.time' },
+  { value: 'level', labelKey: 'fields.level' },
+  { value: 'process', labelKey: 'fields.process' },
+  { value: 'tag', labelKey: 'fields.tag' },
+  { value: 'message', labelKey: 'fields.message', required: true },
 ]
 
 const ALL_LOG_FIELDS: LogField[] = LOG_FIELD_OPTIONS.map((option) => option.value)
@@ -351,7 +368,7 @@ function createDetachedPlaceholderTab(transferId: string): LogTab {
   return {
     ...createLogTab(0),
     id: `detached-${transferId || 'pending'}`,
-    title: '分离日志页',
+    title: translate('tabs.detachedPlaceholder'),
   }
 }
 
@@ -475,6 +492,7 @@ function normalizeAppearancePayload(
   payload: Partial<AppearanceEventPayload>,
   fallback: AppearanceEventPayload = {
     theme: 'light',
+    languagePreference: readLanguagePreference(),
     logColorScheme: 'android-studio',
     logFontSize: DEFAULT_LOG_FONT_SIZE,
     logRowPadding: DEFAULT_LOG_ROW_PADDING,
@@ -482,6 +500,9 @@ function normalizeAppearancePayload(
 ): AppearanceEventPayload {
   return {
     theme: payload.theme ? normalizeTheme(payload.theme) : fallback.theme,
+    languagePreference: payload.languagePreference
+      ? normalizeLanguagePreference(payload.languagePreference)
+      : fallback.languagePreference,
     logColorScheme: payload.logColorScheme
       ? normalizeLogColorScheme(payload.logColorScheme)
       : fallback.logColorScheme,
@@ -501,6 +522,7 @@ function normalizeAppearancePayload(
 function appearanceFromTransferPayload(payload: TabTransferPayload) {
   if (
     !payload.theme &&
+    !payload.languagePreference &&
     !payload.logColorScheme &&
     typeof payload.logFontSize !== 'number' &&
     typeof payload.logRowPadding !== 'number'
@@ -738,6 +760,7 @@ function serializeTabForTransfer(
     title: tab.title,
     source: tab.source,
     theme: appearance.theme,
+    languagePreference: appearance.languagePreference,
     logColorScheme: appearance.logColorScheme,
     logFontSize: appearance.logFontSize,
     logRowPadding: appearance.logRowPadding,
@@ -771,7 +794,7 @@ function parseTabTransferPayload(payloadText: string | null): TabTransferPayload
 
   const payload = JSON.parse(payloadText) as Partial<TabTransferPayload>
   if (payload.schemaVersion !== TAB_TRANSFER_SCHEMA_VERSION) {
-    throw new Error('日志页中转数据版本不匹配')
+    throw new Error(translate('tabs.transferVersionMismatch'))
   }
   return payload as TabTransferPayload
 }
@@ -913,18 +936,18 @@ function deviceLabelForSerial(serial: string | undefined, devices: AdbDevice[]) 
 
 function deviceFilterLabel(selectedSerials: string[], onlineDevices: AdbDevice[]) {
   if (onlineDevices.length === 0) {
-    return '设备 无'
+    return translate('log.device.labelNone')
   }
   if (selectedSerials.length === 0) {
-    return '设备 未选'
+    return translate('log.device.labelUnselected')
   }
   if (selectedSerials.length === 1) {
-    return `设备 ${deviceLabelForSerial(selectedSerials[0], onlineDevices)}`
+    return translate('log.device.labelOne', { device: deviceLabelForSerial(selectedSerials[0], onlineDevices) })
   }
   if (selectedSerials.length === onlineDevices.length) {
-    return `设备 全部 ${selectedSerials.length}`
+    return translate('log.device.labelAll', { count: selectedSerials.length })
   }
-  return `设备 ${selectedSerials.length}/${onlineDevices.length}`
+  return translate('log.device.labelPartial', { selected: selectedSerials.length, total: onlineDevices.length })
 }
 
 function levelClass(level: LogLevel) {
@@ -964,7 +987,7 @@ function packageOptions(processes: DeviceProcessInfo[]) {
 function packageOptionsFromApplications(applications: string[], selectedSerials: string[]) {
   return applications.map<PackageOption>((name) => ({
     name,
-    pidLabel: '离线',
+    pidLabel: translate('log.package.offline'),
     serials: selectedSerials,
   }))
 }
@@ -1045,16 +1068,17 @@ function countSuffix(count: number) {
 
 function levelFilterLabel(selectedLevels: LogLevel[]) {
   if (selectedLevels.length === 0) {
-    return 'Level 全部'
+    return translate('level.all')
   }
   if (selectedLevels.length === 1) {
-    return `Level ${LOG_LEVEL_LABELS[selectedLevels[0]]}`
+    return translate('level.selected', { level: LOG_LEVEL_LABELS[selectedLevels[0]] })
   }
-  return `Level ${selectedLevels.length}`
+  return translate('level.selectedCount', { count: selectedLevels.length })
 }
 
 function logFieldLabel(field: LogField) {
-  return LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label ?? field
+  const option = LOG_FIELD_OPTIONS.find((item) => item.value === field)
+  return option ? translate(option.labelKey) : field
 }
 
 function logCellText(field: LogField, entry: LogEntry, devices: AdbDevice[]) {
@@ -1114,18 +1138,22 @@ function formatCheckedTime(epochMs?: number) {
 
 function updateStatusTitle(status: UpdateCheckStatus) {
   if (status === 'checking') {
-    return '正在检查更新'
+    return translate('update.checking')
   }
   if (status === 'available') {
-    return '发现新版本'
+    return translate('update.available')
   }
   if (status === 'current') {
-    return '当前已是最新版本'
+    return translate('update.current')
   }
   if (status === 'error') {
-    return '更新检查失败'
+    return translate('update.error')
   }
-  return '自动检查更新'
+  return translate('update.idle')
+}
+
+function localizedStateMessage(state: { message: string; messageKey?: string; messageArgs?: Record<string, unknown> }) {
+  return state.messageKey ? translate(state.messageKey, state.messageArgs) : localizeBackendMessage(state.message)
 }
 
 async function copyTextToClipboard(text: string) {
@@ -1145,7 +1173,7 @@ async function copyTextToClipboard(text: string) {
   const copied = document.execCommand('copy')
   document.body.removeChild(textarea)
   if (!copied) {
-    throw new Error('系统剪贴板不可用')
+    throw new Error(translate('common.clipboardUnavailable'))
   }
 }
 
@@ -1276,6 +1304,7 @@ function HighlightedText({
 }
 
 function App() {
+  const { t } = useTranslation()
   const detachedTransferId = useMemo(() => readDetachedTransferId(), [])
   const isDetachedWindow = detachedTransferId.length > 0
   const [initialAppState] = useState(() => createInitialAppState(detachedTransferId))
@@ -1290,7 +1319,8 @@ function App() {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckState>({
     status: 'idle',
     releaseUrl: RELEASE_PAGE_URL,
-    message: '启动后会自动检查 GitHub Release。',
+    message: '',
+    messageKey: 'update.startupMessage',
   })
   const [updateInstall, setUpdateInstall] = useState<UpdateInstallState>({
     open: false,
@@ -1308,6 +1338,8 @@ function App() {
   const [tagSearch, setTagSearch] = useState('')
   const [contentMenuOpen, setContentMenuOpen] = useState(false)
   const [logSchemeMenuOpen, setLogSchemeMenuOpen] = useState(false)
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
+  const [languagePreference, setLanguagePreference] = useState<LanguagePreference>(() => readLanguagePreference())
   const [theme, setTheme] = useState<'light' | 'dark'>(initialAppState.theme)
   const [logColorScheme, setLogColorScheme] = useState<LogColorScheme>(initialAppState.logColorScheme)
   const [logFontSize, setLogFontSize] = useState(initialAppState.logFontSize)
@@ -1347,6 +1379,7 @@ function App() {
     startWidth: number
   }>()
   const logSchemeSelectRef = useRef<HTMLDivElement>(null)
+  const languageSelectRef = useRef<HTMLDivElement>(null)
   const deviceFilterRef = useRef<HTMLDivElement>(null)
   const packageFilterRef = useRef<HTMLDivElement>(null)
   const levelFilterRef = useRef<HTMLDivElement>(null)
@@ -1355,6 +1388,7 @@ function App() {
 
   const applyAppearance = useCallback((appearance: AppearanceEventPayload) => {
     setTheme(appearance.theme)
+    setLanguagePreference(appearance.languagePreference)
     setLogColorScheme(appearance.logColorScheme)
     setLogFontSize(appearance.logFontSize)
     setLogRowPadding(appearance.logRowPadding)
@@ -1376,7 +1410,7 @@ function App() {
         const payloadText = await takeTabTransfer(detachedTransferId)
         const payload = parseTabTransferPayload(payloadText)
         if (!payload) {
-          throw new Error('未找到分离日志页的中转数据')
+          throw new Error(translate('tabs.detachedTransferMissing'))
         }
 
         const tab = createTabFromTransferPayload(payload)
@@ -1394,7 +1428,7 @@ function App() {
         setAppearanceSyncReady(true)
       } catch (error) {
         if (!disposed) {
-          setLogError(error instanceof Error ? error.message : String(error))
+          setLogError(localizeBackendMessage(error))
           setAppearanceSyncReady(true)
         }
       }
@@ -1419,7 +1453,7 @@ function App() {
         const payloadText = await takeTabTransfer(event.payload.transferId)
         const payload = parseTabTransferPayload(payloadText)
         if (!payload) {
-          throw new Error('未找到回归日志页的中转数据')
+          throw new Error(translate('tabs.reattachTransferMissing'))
         }
         if (disposed) {
           return
@@ -1442,7 +1476,7 @@ function App() {
         setLogError('')
       } catch (error) {
         if (!disposed) {
-          setLogError(error instanceof Error ? error.message : String(error))
+          setLogError(localizeBackendMessage(error))
         }
       }
     })
@@ -1455,7 +1489,7 @@ function App() {
       })
       .catch((error) => {
         if (!disposed) {
-          setLogError(error instanceof Error ? error.message : String(error))
+          setLogError(localizeBackendMessage(error))
         }
       })
 
@@ -1489,10 +1523,10 @@ function App() {
   const isStarting = startingTabId === activeTab.id
   const startPauseLabel =
     activeTab.source === 'imported'
-      ? '离线'
+      ? t('log.controls.offline')
       : !isRunning
-        ? isStarting ? '启动中' : '开始'
-        : activeTab.paused ? '继续' : '暂停'
+        ? isStarting ? t('log.controls.starting') : t('log.controls.start')
+        : activeTab.paused ? t('log.controls.resume') : t('log.controls.pause')
   const activeLogWindowStart = logWindowStarts[activeTabId] ?? 0
   const activeStickToBottom = logStickToBottomByTabRef.current[activeTabId] ?? true
   const activeLogWindowLimit = activeStickToBottom
@@ -1544,11 +1578,12 @@ function App() {
   const currentAppearance = useMemo(
     () => ({
       theme,
+      languagePreference,
       logColorScheme,
       logFontSize,
       logRowPadding,
     }),
-    [logColorScheme, logFontSize, logRowPadding, theme],
+    [languagePreference, logColorScheme, logFontSize, logRowPadding, theme],
   )
 
   const setActiveLogWindowStart = useCallback(
@@ -1754,7 +1789,7 @@ function App() {
         unlisten = callback
       })
       .catch((error) => {
-        setLogError(error instanceof Error ? error.message : String(error))
+        setLogError(localizeBackendMessage(error))
       })
 
     return () => {
@@ -1770,6 +1805,11 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.logScheme = logColorScheme
   }, [logColorScheme])
+
+  useEffect(() => {
+    writeLanguagePreference(languagePreference)
+    void applyLanguagePreference(languagePreference)
+  }, [languagePreference])
 
   useEffect(() => {
     let disposed = false
@@ -1789,7 +1829,7 @@ function App() {
         unlisten = callback
       })
       .catch((error) => {
-        setLogError(error instanceof Error ? error.message : String(error))
+        setLogError(localizeBackendMessage(error))
       })
 
     return () => {
@@ -1888,7 +1928,8 @@ function App() {
       !levelMenuOpen &&
       !tagMenuOpen &&
       !contentMenuOpen &&
-      !logSchemeMenuOpen
+      !logSchemeMenuOpen &&
+      !languageMenuOpen
     ) {
       return undefined
     }
@@ -1905,12 +1946,14 @@ function App() {
     const closeLevelMenu = () => setLevelMenuOpen(false)
     const closeContentMenu = () => setContentMenuOpen(false)
     const closeLogSchemeMenu = () => setLogSchemeMenuOpen(false)
+    const closeLanguageMenu = () => setLanguageMenuOpen(false)
     const handlePointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Node)) {
         return
       }
 
       const clickedLogSchemeSelect = logSchemeSelectRef.current?.contains(event.target) ?? false
+      const clickedLanguageSelect = languageSelectRef.current?.contains(event.target) ?? false
       const clickedDeviceFilter = deviceFilterRef.current?.contains(event.target) ?? false
       const clickedPackageFilter = packageFilterRef.current?.contains(event.target) ?? false
       const clickedLevelFilter = levelFilterRef.current?.contains(event.target) ?? false
@@ -1918,6 +1961,9 @@ function App() {
       const clickedContentFilter = contentFilterRef.current?.contains(event.target) ?? false
       if (logSchemeMenuOpen && !clickedLogSchemeSelect) {
         closeLogSchemeMenu()
+      }
+      if (languageMenuOpen && !clickedLanguageSelect) {
+        closeLanguageMenu()
       }
       if (deviceMenuOpen && !clickedDeviceFilter) {
         closeDeviceMenu()
@@ -1943,6 +1989,7 @@ function App() {
         closeLevelMenu()
         closeTagMenu()
         closeContentMenu()
+        closeLanguageMenu()
       }
     }
 
@@ -1952,7 +1999,15 @@ function App() {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [contentMenuOpen, deviceMenuOpen, levelMenuOpen, logSchemeMenuOpen, packageMenuOpen, tagMenuOpen])
+  }, [
+    contentMenuOpen,
+    deviceMenuOpen,
+    languageMenuOpen,
+    levelMenuOpen,
+    logSchemeMenuOpen,
+    packageMenuOpen,
+    tagMenuOpen,
+  ])
 
   const updateTab = useCallback((tabId: string, updater: (tab: LogTab) => LogTab) => {
     setTabs((current) => current.map((tab) => (tab.id === tabId ? updater(tab) : tab)))
@@ -2034,7 +2089,8 @@ function App() {
       setUpdateCheck((current) => ({
         ...current,
         status: 'checking',
-        message: manual ? '正在从 GitHub Release 获取最新版本。' : '正在自动检查 GitHub Release。',
+        message: '',
+        messageKey: manual ? 'update.checkingManual' : 'update.checkingAuto',
       }))
 
       try {
@@ -2049,6 +2105,8 @@ function App() {
           assetSizeBytes: result.assetSizeBytes,
           checkedAtEpochMs: result.checkedAtEpochMs,
           message: result.ok ? result.message : result.error ?? result.message,
+          messageKey: undefined,
+          messageArgs: undefined,
         }
         setUpdateCheck(nextState)
 
@@ -2057,45 +2115,47 @@ function App() {
             showToast({
               id: Date.now(),
               tone: 'danger',
-              title: '更新检查失败',
-              message: result.error ?? result.message,
+              title: t('update.error'),
+              message: localizeBackendMessage(result.error ?? result.message),
             })
           }
         } else if (result.hasUpdate) {
           showToast({
             id: Date.now(),
             tone: 'success',
-            title: '发现新版本',
+            title: t('update.available'),
             message: displayVersion(result.latestVersion),
           })
         } else if (manual) {
           showToast({
             id: Date.now(),
             tone: 'success',
-            title: '当前已是最新版本',
+            title: t('update.current'),
             message: displayVersion(result.currentVersion),
           })
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = localizeBackendMessage(error)
         setUpdateCheck((current) => ({
           ...current,
           status: 'error',
           releaseUrl: current.releaseUrl ?? RELEASE_PAGE_URL,
           checkedAtEpochMs: Date.now(),
           message,
+          messageKey: undefined,
+          messageArgs: undefined,
         }))
         if (manual) {
           showToast({
             id: Date.now(),
             tone: 'danger',
-            title: '更新检查失败',
+            title: t('update.error'),
             message,
           })
         }
       }
     },
-    [showToast],
+    [showToast, t],
   )
 
   const applyUpdateInstallProgress = useCallback((progress: UpdateInstallProgress) => {
@@ -2103,6 +2163,8 @@ function App() {
       open: true,
       status: progress.stage === 'installing' ? 'installing' : 'downloading',
       message: progress.message,
+      messageKey: undefined,
+      messageArgs: undefined,
       downloadedBytes: progress.downloadedBytes,
       totalBytes: progress.totalBytes ?? current.totalBytes,
       percent: progress.percent ?? current.percent,
@@ -2116,7 +2178,7 @@ function App() {
         showToast({
           id: Date.now(),
           tone: 'danger',
-          title: '没有可打开的链接',
+          title: t('update.noUrlTitle'),
         })
         return
       }
@@ -2126,19 +2188,19 @@ function App() {
         showToast({
           id: Date.now(),
           tone: result.ok ? 'success' : 'danger',
-          title: result.ok ? successTitle : '打开链接失败',
-          message: result.ok ? undefined : result.error ?? result.message,
+          title: result.ok ? successTitle : t('update.openFailedTitle'),
+          message: result.ok ? undefined : localizeBackendMessage(result.error ?? result.message),
         })
       } catch (error) {
         showToast({
           id: Date.now(),
           tone: 'danger',
-          title: '打开链接失败',
-          message: error instanceof Error ? error.message : String(error),
+          title: t('update.openFailedTitle'),
+          message: localizeBackendMessage(error),
         })
       }
     },
-    [showToast],
+    [showToast, t],
   )
 
   const downloadUpdateAsset = useCallback(async () => {
@@ -2146,8 +2208,8 @@ function App() {
       showToast({
         id: Date.now(),
         tone: 'danger',
-        title: '未找到适配安装包',
-        message: '请打开 Release 页面手动选择。',
+        title: t('update.missingAssetTitle'),
+        message: t('update.missingAssetMessage'),
       })
       return
     }
@@ -2155,7 +2217,8 @@ function App() {
     setUpdateInstall({
       open: true,
       status: 'downloading',
-      message: '准备下载安装包。',
+      message: '',
+      messageKey: 'update.prepareDownload',
       downloadedBytes: 0,
       totalBytes: updateCheck.assetSizeBytes,
       percent: 0,
@@ -2168,7 +2231,7 @@ function App() {
         updateCheck.assetName,
       )
       if (!result.ok) {
-        throw new Error(result.error ?? result.message)
+        throw new Error(localizeBackendMessage(result.error ?? result.message))
       }
 
       setUpdateInstall((current) => ({
@@ -2176,39 +2239,44 @@ function App() {
         open: true,
         status: 'installing',
         message: result.message,
+        messageKey: undefined,
+        messageArgs: undefined,
         percent: 100,
         filePath: result.filePath ?? current.filePath,
       }))
       showToast({
         id: Date.now(),
         tone: 'success',
-        title: '安装程序已启动',
+        title: t('update.installerStarted'),
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = localizeBackendMessage(error)
       setUpdateInstall((current) => ({
         ...current,
         open: true,
         status: 'error',
         message,
+        messageKey: undefined,
+        messageArgs: undefined,
       }))
       showToast({
         id: Date.now(),
         tone: 'danger',
-        title: '更新失败',
+        title: t('update.updateFailed'),
         message,
       })
     }
   }, [
     showToast,
+    t,
     updateCheck.assetDownloadUrl,
     updateCheck.assetName,
     updateCheck.assetSizeBytes,
   ])
 
   const openReleasePage = useCallback(async () => {
-    await openUpdateUrl(updateCheck.releaseUrl ?? RELEASE_PAGE_URL, '已打开 Release 页面')
-  }, [openUpdateUrl, updateCheck.releaseUrl])
+    await openUpdateUrl(updateCheck.releaseUrl ?? RELEASE_PAGE_URL, t('update.releaseOpened'))
+  }, [openUpdateUrl, t, updateCheck.releaseUrl])
 
   const openCellCopyMenu = useCallback(
     (event: ReactMouseEvent<HTMLSpanElement>, label: string, text: string) => {
@@ -2236,19 +2304,19 @@ function App() {
       showToast({
         id: Date.now(),
         tone: 'success',
-        title: `已复制${cellCopyMenu.label}`,
+        title: t('common.copied', { label: cellCopyMenu.label }),
       })
     } catch (error) {
       showToast({
         id: Date.now(),
         tone: 'danger',
-        title: '复制失败',
-        message: error instanceof Error ? error.message : String(error),
+        title: t('common.copyFailed'),
+        message: localizeBackendMessage(error),
       })
     } finally {
       setCellCopyMenu(undefined)
     }
-  }, [cellCopyMenu, showToast])
+  }, [cellCopyMenu, showToast, t])
 
   const beginRenameTab = useCallback((tab: LogTab) => {
     setEditingTabId(tab.id)
@@ -2297,7 +2365,7 @@ function App() {
           processesBySerial: { ...tab.processesBySerial, [serial]: result.processes },
           processErrorsBySerial: {
             ...tab.processErrorsBySerial,
-            [serial]: result.ok ? '' : result.error ?? '读取进程列表失败',
+            [serial]: result.ok ? '' : localizeBackendMessage(result.error ?? t('adb.readProcessesFailed')),
           },
           loadingProcessesBySerial: { ...tab.loadingProcessesBySerial, [serial]: false },
         }))
@@ -2307,13 +2375,13 @@ function App() {
           processesBySerial: { ...tab.processesBySerial, [serial]: [] },
           processErrorsBySerial: {
             ...tab.processErrorsBySerial,
-            [serial]: error instanceof Error ? error.message : String(error),
+            [serial]: localizeBackendMessage(error),
           },
           loadingProcessesBySerial: { ...tab.loadingProcessesBySerial, [serial]: false },
         }))
       }
     },
-    [updateTab],
+    [t, updateTab],
   )
 
   const refreshDevices = useCallback(async () => {
@@ -2333,10 +2401,10 @@ function App() {
       )
 
       if (!result.ok) {
-        setDeviceError(result.error ?? '读取设备列表失败')
+        setDeviceError(localizeBackendMessage(result.error ?? t('adb.readDevicesFailed')))
       }
     } catch (error) {
-      setDeviceError(error instanceof Error ? error.message : String(error))
+      setDeviceError(localizeBackendMessage(error))
       setDevices([])
       setTabs((current) =>
         current.map((tab) => (tab.source === 'imported' ? tab : reconcileTabDevices(tab, []))),
@@ -2344,7 +2412,7 @@ function App() {
     } finally {
       setLoadingDevices(false)
     }
-  }, [])
+  }, [t])
 
   const startTabLogcat = useCallback(
     async (
@@ -2403,7 +2471,7 @@ function App() {
           restoreSessionRunning: false,
         }))
       } catch (error) {
-        setLogError(error instanceof Error ? error.message : String(error))
+        setLogError(localizeBackendMessage(error))
         updateTab(tabId, (current) => ({
           ...current,
           sessions: [],
@@ -2497,7 +2565,7 @@ function App() {
     try {
       const entries = activeTab.store.getFilteredEntries()
       if (entries.length === 0) {
-        throw new Error('没有可导出的日志')
+        throw new Error(t('export.noLogs'))
       }
 
       const content = stringifyAndroidStudioLogcatFile(
@@ -2517,23 +2585,23 @@ function App() {
         showToast({
           id: Date.now(),
           tone: 'success',
-          title: '已导出日志',
+          title: t('export.success'),
           message: result.filePath,
         })
       } catch (error) {
         showToast({
           id: Date.now(),
           tone: 'success',
-          title: '已导出日志',
-          message: `打开文件管理器失败：${error instanceof Error ? error.message : String(error)}`,
+          title: t('export.success'),
+          message: t('export.revealFailed', { message: localizeBackendMessage(error) }),
         })
       }
     } catch (error) {
       showToast({
         id: Date.now(),
         tone: 'danger',
-        title: '导出失败',
-        message: error instanceof Error ? error.message : String(error),
+        title: t('export.failed'),
+        message: localizeBackendMessage(error),
       })
     } finally {
       setIsExporting(false)
@@ -2548,6 +2616,7 @@ function App() {
     activeTab.store,
     devices,
     showToast,
+    t,
   ])
 
   const handleImportButtonClick = useCallback(() => {
@@ -2610,21 +2679,21 @@ function App() {
         showToast({
           id: Date.now(),
           tone: 'success',
-          title: '已导入日志',
-          message: `${imported.entries.length.toLocaleString()} 条日志`,
+          title: t('import.success'),
+          message: t('import.count', { count: imported.entries.length.toLocaleString() }),
         })
       } catch (error) {
         showToast({
           id: Date.now(),
           tone: 'danger',
-          title: '导入失败',
-          message: error instanceof Error ? error.message : String(error),
+          title: t('import.failed'),
+          message: localizeBackendMessage(error),
         })
       } finally {
         setIsImporting(false)
       }
     },
-    [showToast],
+    [showToast, t],
   )
 
   const handleExitApp = useCallback(async () => {
@@ -2635,7 +2704,7 @@ function App() {
     } catch (error) {
       setClosingApp(false)
       setExitConfirmOpen(false)
-      setLogError(error instanceof Error ? error.message : String(error))
+      setLogError(localizeBackendMessage(error))
     }
   }, [])
 
@@ -2644,7 +2713,7 @@ function App() {
     try {
       await getCurrentWindow().minimize()
     } catch (error) {
-      setLogError(error instanceof Error ? error.message : String(error))
+      setLogError(localizeBackendMessage(error))
     }
   }, [])
 
@@ -2863,7 +2932,7 @@ function App() {
         if (transferId) {
           void clearTabTransfer(transferId)
         }
-        setLogError(error instanceof Error ? error.message : String(error))
+        setLogError(localizeBackendMessage(error))
       } finally {
         setDetachingTabId('')
       }
@@ -2903,7 +2972,7 @@ function App() {
       if (transferId) {
         void clearTabTransfer(transferId)
       }
-      setLogError(error instanceof Error ? error.message : String(error))
+      setLogError(localizeBackendMessage(error))
       setReturningToMain(false)
     }
   }, [activeTab, currentAppearance, isDetachedWindow, returningToMain])
@@ -3118,7 +3187,7 @@ function App() {
           item.sessions.some((session) => session.sessionId === payload.sessionId),
         )
         if (tab) {
-          setLogError(payload.message)
+          setLogError(localizeBackendMessage(payload.message))
         }
       }),
       listenLogcatStopped((payload) => {
@@ -3165,12 +3234,12 @@ function App() {
     updateInstalling ||
     (updateActionIsInstall && !updateCheck.assetDownloadUrl)
   const updateActionLabel = updateInstalling
-    ? '更新中'
+    ? t('update.updating')
     : updateActionIsInstall
-      ? '更新'
+      ? t('update.update')
       : updateChecking
-        ? '检查中'
-        : '检查更新'
+        ? t('update.checkingButton')
+        : t('update.checkUpdates')
 
   return (
     <main className="app-shell">
@@ -3178,8 +3247,8 @@ function App() {
         <div className="modal-backdrop" role="presentation">
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="exit-confirm-title">
             <div>
-              <h2 id="exit-confirm-title">关闭 Android Log Desktop？</h2>
-              <p>退出前会停止正在运行的 adb logcat 命令。选择最小化会保留当前监听状态。</p>
+              <h2 id="exit-confirm-title">{t('exit.title')}</h2>
+              <p>{t('exit.description')}</p>
             </div>
             <div className="confirm-actions">
               <button
@@ -3188,13 +3257,13 @@ function App() {
                 onClick={() => void handleExitApp()}
                 type="button"
               >
-                {closingApp ? '正在退出...' : '退出应用'}
+                {closingApp ? t('exit.exiting') : t('exit.exit')}
               </button>
               <button disabled={closingApp} onClick={() => void handleMinimizeApp()} type="button">
-                最小化
+                {t('exit.minimize')}
               </button>
               <button disabled={closingApp} onClick={() => setExitConfirmOpen(false)} type="button">
-                取消
+                {t('common.cancel')}
               </button>
             </div>
           </section>
@@ -3206,9 +3275,9 @@ function App() {
             <div className="update-dialog-header">
               <div>
                 <h2 id="update-dialog-title">
-                  {updateInstall.status === 'error' ? '更新失败' : '正在更新 Android Log Desktop'}
+                  {updateInstall.status === 'error' ? t('update.updateFailed') : t('update.updatingTitle')}
                 </h2>
-                <p>{updateInstall.message}</p>
+                <p>{localizedStateMessage(updateInstall)}</p>
               </div>
               {updateInstall.status === 'error' ? (
                 <button
@@ -3239,7 +3308,7 @@ function App() {
                 {updateDownloadedLabel}
                 {updateTotalLabel ? ` / ${updateTotalLabel}` : ''}
               </span>
-              <strong>{updatePercentLabel ?? '下载中'}</strong>
+              <strong>{updatePercentLabel ?? t('update.downloading')}</strong>
             </div>
             {updateInstall.filePath ? (
               <p className="update-file-path" title={updateInstall.filePath}>
@@ -3252,14 +3321,14 @@ function App() {
                   onClick={() => setUpdateInstall((current) => ({ ...current, open: false }))}
                   type="button"
                 >
-                  关闭
+                  {t('common.close')}
                 </button>
                 <button onClick={() => void openReleasePage()} type="button">
-                  打开 Release 页面
+                  {t('update.releasePage')}
                 </button>
               </div>
             ) : (
-              <p className="hint-text">下载完成后会自动启动安装流程，安装前会停止正在运行的 logcat。</p>
+              <p className="hint-text">{t('update.installHint')}</p>
             )}
           </section>
         </div>
@@ -3278,31 +3347,33 @@ function App() {
         </div>
 
         <section className={`sidebar-section update-section update-${updateCheck.status}`}>
-          <p className="section-label">软件更新</p>
+          <p className="section-label">{t('update.section')}</p>
           <div className="update-summary">
             <span className="update-indicator" />
             <div>
               <strong>{updateStatusTitle(updateCheck.status)}</strong>
-              <span>{updateCheck.message}</span>
+              <span>{localizedStateMessage(updateCheck)}</span>
             </div>
           </div>
           <div className="update-version-grid">
             <div>
-              <span>当前版本</span>
+              <span>{t('update.currentVersion')}</span>
               <strong>{displayVersion(updateCheck.currentVersion)}</strong>
             </div>
             <div>
-              <span>最新版本</span>
+              <span>{t('update.latestVersion')}</span>
               <strong>{displayVersion(updateCheck.latestVersion)}</strong>
             </div>
           </div>
           {updateCheck.assetName ? (
             <p className="hint-text" title={updateCheck.assetName}>
-              适配包 {updateCheck.assetName}
-              {updateCheck.assetSizeBytes ? ` · ${formatBytes(updateCheck.assetSizeBytes)}` : ''}
+              {t('update.package', {
+                name: updateCheck.assetName,
+                size: updateCheck.assetSizeBytes ? ` · ${formatBytes(updateCheck.assetSizeBytes)}` : '',
+              })}
             </p>
           ) : null}
-          {updateLastChecked ? <p className="hint-text">最近检查 {updateLastChecked}</p> : null}
+          {updateLastChecked ? <p className="hint-text">{t('update.lastChecked', { time: updateLastChecked })}</p> : null}
           <div className="utility-actions">
             <button
               disabled={updateActionDisabled}
@@ -3320,20 +3391,60 @@ function App() {
             </button>
             <button disabled={updateInstalling} onClick={() => void openReleasePage()} type="button">
               <ExternalLink size={15} />
-              Release 页面
+              {t('update.releasePage')}
             </button>
           </div>
         </section>
 
         <section className="sidebar-section">
-          <p className="section-label">外观</p>
+          <p className="section-label">{t('appearance.section')}</p>
           <button
             className="theme-toggle"
             onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
           >
             {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
-            {theme === 'light' ? '切换暗色' : '切换亮色'}
+            {theme === 'light' ? t('appearance.switchDark') : t('appearance.switchLight')}
           </button>
+          <div className="theme-select-control" ref={languageSelectRef}>
+            <button
+              aria-expanded={languageMenuOpen}
+              className={`theme-select-trigger ${languageMenuOpen ? 'open' : ''}`}
+              onClick={() => setLanguageMenuOpen((open) => !open)}
+              type="button"
+            >
+              <span>{t('language.label')}</span>
+              <strong>
+                {t(
+                  LANGUAGE_OPTIONS.find((option) => option.value === languagePreference)?.labelKey ??
+                    'language.system',
+                )}
+              </strong>
+              <ChevronDown className="theme-select-chevron" size={16} />
+            </button>
+            {languageMenuOpen ? (
+              <div className="theme-select-menu" role="listbox">
+                {LANGUAGE_OPTIONS.map((option) => {
+                  const selected = option.value === languagePreference
+                  return (
+                    <button
+                      aria-selected={selected}
+                      className={`theme-select-option ${selected ? 'selected' : ''}`}
+                      key={option.value}
+                      onClick={() => {
+                        setLanguagePreference(option.value)
+                        setLanguageMenuOpen(false)
+                      }}
+                      role="option"
+                      type="button"
+                    >
+                      <span className="theme-select-check">{selected ? <Check size={16} /> : null}</span>
+                      {t(option.labelKey)}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
           <div className="theme-select-control" ref={logSchemeSelectRef}>
             <button
               aria-expanded={logSchemeMenuOpen}
@@ -3341,7 +3452,7 @@ function App() {
               onClick={() => setLogSchemeMenuOpen((open) => !open)}
               type="button"
             >
-              <span>日志配色</span>
+              <span>{t('appearance.logScheme')}</span>
               <strong>{LOG_COLOR_SCHEME_LABELS[logColorScheme]}</strong>
               <ChevronDown className="theme-select-chevron" size={16} />
             </button>
@@ -3362,7 +3473,7 @@ function App() {
                       type="button"
                     >
                       <span className="theme-select-check">{selected ? <Check size={16} /> : null}</span>
-                      日志配色：{label}
+                      {t('appearance.logSchemeOption', { label })}
                     </button>
                   )
                 })}
@@ -3371,7 +3482,7 @@ function App() {
           </div>
           <label className="preference-control">
             <span className="preference-heading">
-              <span>日志字号</span>
+              <span>{t('appearance.fontSize')}</span>
               <strong>{logFontSize}px</strong>
             </span>
             <input
@@ -3387,13 +3498,13 @@ function App() {
               value={logFontSize}
             />
             <span className="preference-scale">
-              <span>小</span>
-              <span>大</span>
+              <span>{t('appearance.small')}</span>
+              <span>{t('appearance.large')}</span>
             </span>
           </label>
           <label className="preference-control">
             <span className="preference-heading">
-              <span>行内边距</span>
+              <span>{t('appearance.rowPadding')}</span>
               <strong>{logRowPadding}px</strong>
             </span>
             <input
@@ -3409,17 +3520,17 @@ function App() {
               value={logRowPadding}
             />
             <span className="preference-scale">
-              <span>紧凑</span>
-              <span>舒展</span>
+              <span>{t('appearance.compact')}</span>
+              <span>{t('appearance.comfortable')}</span>
             </span>
           </label>
         </section>
 
         <section className="sidebar-section">
-          <p className="section-label">ADB</p>
+          <p className="section-label">{t('adb.section')}</p>
           <div className={`adb-status ${adbInfo?.available ? 'available' : 'unavailable'}`}>
             {adbInfo?.available ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-            <span>{adbInfo?.available ? '已就绪' : '未找到'}</span>
+            <span>{adbInfo?.available ? t('adb.ready') : t('adb.missing')}</span>
           </div>
           {adbInfo?.path ? <code className="path-line">{adbInfo.path}</code> : null}
         </section>
@@ -3480,16 +3591,16 @@ function App() {
                 <span className="tab-title">{tab.title}</span>
               )}
               {detachingTabId === tab.id ? (
-                <small>分离中</small>
+                <small>{t('tabs.detaching')}</small>
               ) : tab.source === 'imported' ? (
-                <small>离线</small>
+                <small>{t('tabs.offline')}</small>
               ) : tab.sessions.some((session) => session.running) ? (
-                <small>{tab.paused ? '暂停' : `运行 ${tab.sessions.length}`}</small>
+                <small>{tab.paused ? t('tabs.paused') : t('tabs.running', { count: tab.sessions.length })}</small>
               ) : null}
               {!isDetachedWindow ? (
                 <>
                   <button
-                    aria-label="分离日志页"
+                    aria-label={t('tabs.detach')}
                     className="tab-action-button"
                     onClick={(event) => {
                       event.stopPropagation()
@@ -3499,7 +3610,7 @@ function App() {
                     <ExternalLink size={14} />
                   </button>
                   <button
-                    aria-label="关闭日志页"
+                    aria-label={t('tabs.close')}
                     className="tab-action-button"
                     onClick={(event) => {
                       event.stopPropagation()
@@ -3521,18 +3632,18 @@ function App() {
 
         <header className="toolbar">
           <div className="toolbar-summary">
-            <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
+            <button className="icon-button" onClick={() => setDrawerOpen(true)} title={t('drawer.open')}>
               <Menu size={18} />
             </button>
-            <div className="toolbar-metrics" aria-label="日志状态">
+            <div className="toolbar-metrics" aria-label={t('log.status.label')}>
               <span>
-                缓存 <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
+                {t('log.status.cache')} <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
               </span>
               <span>
-                筛选 <strong>{logSnapshot.filteredCount.toLocaleString()}</strong>
+                {t('log.status.filtered')} <strong>{logSnapshot.filteredCount.toLocaleString()}</strong>
               </span>
               <span>
-                淘汰 <strong>{logSnapshot.droppedCount.toLocaleString()}</strong>
+                {t('log.status.dropped')} <strong>{logSnapshot.droppedCount.toLocaleString()}</strong>
               </span>
             </div>
           </div>
@@ -3540,7 +3651,7 @@ function App() {
             {isDetachedWindow ? (
               <button className="primary" disabled={returningToMain} onClick={returnTabToMain}>
                 <Undo2 size={16} />
-                {returningToMain ? '回归中' : '回归主窗'}
+                {returningToMain ? t('tabs.returning') : t('tabs.returnToMain')}
               </button>
             ) : null}
             <button disabled={!canControlLogcat || isStarting} onClick={handleStartPause}>
@@ -3549,26 +3660,26 @@ function App() {
             </button>
             <button disabled={!canControlLogcat || isStarting} onClick={handleRestart}>
               <RotateCcw size={16} />
-              Restart
+              {t('log.controls.restart')}
             </button>
             <button disabled={logSnapshot.totalCount === 0} onClick={handleClearLogs}>
               <Trash2 size={16} />
-              清理
+              {t('log.controls.clear')}
             </button>
             <button onClick={scrollLogToTop}>
               <ArrowUpToLine size={16} />
-              滚顶
+              {t('log.controls.top')}
             </button>
             <button onClick={scrollLogToBottom}>
               <ArrowDownToLine size={16} />
-              滚底
+              {t('log.controls.bottom')}
             </button>
             <button
               className={activeTab.softWrap ? 'active-toggle' : ''}
               onClick={() => updateActiveTab((tab) => ({ ...tab, softWrap: !tab.softWrap }))}
             >
               <WrapText size={16} />
-              Soft-wrap
+              {t('log.controls.softWrap')}
             </button>
             <input
               accept=".logcat,.json,application/json"
@@ -3579,11 +3690,11 @@ function App() {
             />
             <button disabled={isImporting} onClick={handleImportButtonClick}>
               <Upload size={16} />
-              {isImporting ? '导入中' : '导入'}
+              {isImporting ? t('log.controls.importing') : t('log.controls.import')}
             </button>
             <button disabled={logSnapshot.filteredCount === 0 || isExporting} onClick={handleExportLogs}>
               <Download size={16} />
-              {isExporting ? '导出中' : '导出'}
+              {isExporting ? t('log.controls.exporting') : t('log.controls.export')}
             </button>
           </div>
         </header>
@@ -3593,7 +3704,7 @@ function App() {
             <AlertTriangle size={18} />
             <div>
               <strong>{deviceError}</strong>
-              {adbInfo?.installHint ? <span>{adbInfo.installHint}</span> : null}
+              {adbInfo?.installHint ? <span>{localizeBackendMessage(adbInfo.installHint)}</span> : null}
             </div>
           </section>
         ) : null}
@@ -3612,7 +3723,7 @@ function App() {
           <section className="notice">
             <span className="notice-dot" />
             <div>
-              <strong>ADB 检测路径</strong>
+              <strong>{t('adb.detectPaths')}</strong>
               <span>{adbInfo.checkedPaths.join(' / ')}</span>
             </div>
           </section>
@@ -3636,7 +3747,7 @@ function App() {
             {deviceMenuOpen ? (
               <div className="filter-popover filter-popover-narrow">
                 <div className="popover-header">
-                  <strong>设备</strong>
+                  <strong>{t('fields.device')}</strong>
                   <button className="icon-button" onClick={() => setDeviceMenuOpen(false)}>
                     <X size={16} />
                   </button>
@@ -3644,13 +3755,13 @@ function App() {
                 <div className="popover-actions">
                   <span>
                     {activeTab.source === 'imported'
-                      ? `${activeDeviceOptions.length} 台离线设备`
-                      : `${activeDeviceOptions.length} 台在线设备`}
+                      ? t('log.device.countOffline', { count: activeDeviceOptions.length })
+                      : t('log.device.countOnline', { count: activeDeviceOptions.length })}
                   </span>
                   {activeTab.source === 'live' ? (
                     <button disabled={loadingDevices} onClick={refreshDevices}>
                       <RefreshCcw size={16} />
-                      {loadingDevices ? '刷新中' : '刷新'}
+                      {loadingDevices ? t('common.refreshing') : t('common.refresh')}
                     </button>
                   ) : null}
                 </div>
@@ -3676,7 +3787,7 @@ function App() {
                     })
                   ) : (
                     <div className="popover-empty">
-                      {activeTab.source === 'imported' ? '导入文件没有设备信息' : '未连接可用设备'}
+                      {activeTab.source === 'imported' ? t('log.device.importedEmpty') : t('log.device.liveEmpty')}
                     </div>
                   )}
                 </div>
@@ -3695,12 +3806,12 @@ function App() {
               }}
             >
               <Package size={16} />
-              包名 {countSuffix(activeTab.selectedPackages.length)}
+              {t('log.package.button', { count: countSuffix(activeTab.selectedPackages.length) })}
             </button>
             {packageMenuOpen ? (
               <div className="filter-popover">
                 <div className="popover-header">
-                  <strong>包名 / 进程</strong>
+                  <strong>{t('log.package.title')}</strong>
                   <button className="icon-button" onClick={() => setPackageMenuOpen(false)}>
                     <X size={16} />
                   </button>
@@ -3711,7 +3822,7 @@ function App() {
                     <input
                       autoFocus
                       onChange={(event) => setPackageSearch(event.target.value)}
-                      placeholder="搜索包名或进程"
+                      placeholder={t('log.package.placeholder')}
                       value={packageSearch}
                     />
                   </label>
@@ -3723,11 +3834,16 @@ function App() {
                       updateActiveTab((tab) => ({ ...tab, selectedPackages: [] }))
                     }}
                   >
-                    清理
+                    {t('common.clear')}
                   </button>
                 </div>
                 <div className="popover-actions">
-                  <span>{packages.length} 个{activeTab.source === 'imported' ? '包名' : '进程'}</span>
+                  <span>
+                    {t('log.package.count', {
+                      count: packages.length,
+                      type: activeTab.source === 'imported' ? t('log.package.typePackage') : t('log.package.typeProcess'),
+                    })}
+                  </span>
                   {activeTab.source === 'live' ? (
                     <button
                       disabled={activeTab.selectedSerials.length === 0 || loadingProcesses}
@@ -3738,7 +3854,7 @@ function App() {
                       }}
                     >
                       <RefreshCcw size={16} />
-                      {loadingProcesses ? '读取中' : '刷新'}
+                      {loadingProcesses ? t('common.loading') : t('common.refresh')}
                     </button>
                   ) : null}
                 </div>
@@ -3761,8 +3877,12 @@ function App() {
                           <span>
                             <strong>{process.name}</strong>
                             <small>
-                              {activeTab.source === 'imported' ? '离线日志' : `pid ${process.pidLabel}`}
-                              {process.serials.length > 1 ? ` · ${process.serials.length} 台设备` : ''}
+                              {activeTab.source === 'imported'
+                                ? t('log.package.offlineLog')
+                                : t('log.package.pid', { pid: process.pidLabel })}
+                              {process.serials.length > 1
+                                ? t('log.package.deviceCount', { count: process.serials.length })
+                                : ''}
                             </small>
                           </span>
                         </button>
@@ -3770,7 +3890,7 @@ function App() {
                     })
                   ) : (
                     <div className="popover-empty">
-                      {activeTab.source === 'imported' ? '没有匹配包名' : '没有匹配进程'}
+                      {activeTab.source === 'imported' ? t('log.package.noPackage') : t('log.package.noProcess')}
                     </div>
                   )}
                 </div>
@@ -3806,7 +3926,7 @@ function App() {
                   >
                     <input readOnly checked={activeTab.selectedLevels.length === 0} type="checkbox" />
                     <span>
-                      <strong>全部</strong>
+                      <strong>{t('common.all')}</strong>
                     </span>
                   </button>
                   {LOG_LEVEL_OPTIONS.map((level) => {
@@ -3819,8 +3939,8 @@ function App() {
                       >
                         <input readOnly checked={checked} type="checkbox" />
                         <span>
-                          <strong>{level.label}</strong>
-                          <small>{level.description}</small>
+                          <strong>{t(level.labelKey)}</strong>
+                          <small>{t(level.descriptionKey)}</small>
                         </span>
                       </button>
                     )
@@ -3857,7 +3977,7 @@ function App() {
                     <input
                       autoFocus
                       onChange={(event) => setTagSearch(event.target.value)}
-                      placeholder="搜索 Tag"
+                      placeholder={t('log.tag.placeholder')}
                       value={tagSearch}
                     />
                   </label>
@@ -3869,11 +3989,11 @@ function App() {
                       updateActiveTab((tab) => ({ ...tab, selectedTags: [] }))
                     }}
                   >
-                    清理
+                    {t('common.clear')}
                   </button>
                 </div>
                 <div className="popover-actions">
-                  <span>{logSnapshot.tagOptions.length} 个 Tag</span>
+                  <span>{t('log.tag.count', { count: logSnapshot.tagOptions.length })}</span>
                 </div>
                 <div className="filter-option-list">
                   {visibleTags.length > 0 ? (
@@ -3897,7 +4017,7 @@ function App() {
                       )
                     })
                   ) : (
-                    <div className="popover-empty">没有匹配 Tag</div>
+                    <div className="popover-empty">{t('log.tag.empty')}</div>
                   )}
                 </div>
               </div>
@@ -3915,12 +4035,15 @@ function App() {
               }}
             >
               <Columns3 size={16} />
-              列显示 {activeTab.visibleLogFields.length}/{ALL_LOG_FIELDS.length}
+              {t('log.columns.button', {
+                selected: activeTab.visibleLogFields.length,
+                total: ALL_LOG_FIELDS.length,
+              })}
             </button>
             {contentMenuOpen ? (
               <div className="filter-popover filter-popover-narrow">
                 <div className="popover-header">
-                  <strong>列显示</strong>
+                  <strong>{t('log.columns.title')}</strong>
                   <button className="icon-button" onClick={() => setContentMenuOpen(false)}>
                     <X size={16} />
                   </button>
@@ -3937,7 +4060,7 @@ function App() {
                       >
                         <input readOnly checked={checked} type="checkbox" />
                         <span>
-                          <strong>{field.label}</strong>
+                          <strong>{t(field.labelKey)}</strong>
                         </span>
                       </button>
                     )
@@ -3948,23 +4071,23 @@ function App() {
           </div>
           <div
             className={`search-field log-search-field ${activeFilterMatcher.error ? 'invalid' : ''}`}
-            title={activeFilterMatcher.error ? `Regex 无效：${activeFilterMatcher.error}` : undefined}
+            title={activeFilterMatcher.error ? t('common.regexInvalid', { error: activeFilterMatcher.error }) : undefined}
           >
             <Search size={16} />
             <input
               onChange={(event) =>
                 updateActiveTab((tab) => ({ ...tab, searchText: event.target.value }))
               }
-              placeholder="过滤日志内容"
+              placeholder={t('log.search.filterPlaceholder')}
               value={activeTab.searchText}
             />
-            <div className="search-option-group" aria-label="搜索选项">
+            <div className="search-option-group" aria-label={t('log.search.filterOptions')}>
               <button
                 aria-label="Match Case"
                 aria-pressed={activeTab.searchOptions.matchCase}
                 className={`search-option-button ${activeTab.searchOptions.matchCase ? 'active-toggle' : ''}`}
                 onClick={() => toggleSearchOption('matchCase')}
-                title="Match Case"
+                title={t('log.search.matchCase')}
               >
                 <CaseSensitive size={15} />
               </button>
@@ -3973,7 +4096,7 @@ function App() {
                 aria-pressed={activeTab.searchOptions.wholeWords}
                 className={`search-option-button ${activeTab.searchOptions.wholeWords ? 'active-toggle' : ''}`}
                 onClick={() => toggleSearchOption('wholeWords')}
-                title="Words"
+                title={t('log.search.words')}
               >
                 <WholeWord size={15} />
               </button>
@@ -3984,7 +4107,7 @@ function App() {
                   activeFilterMatcher.error ? 'invalid' : ''
                 }`}
                 onClick={() => toggleSearchOption('regex')}
-                title={activeFilterMatcher.error ? `Regex 无效：${activeFilterMatcher.error}` : 'Regex'}
+                title={activeFilterMatcher.error ? t('common.regexInvalid', { error: activeFilterMatcher.error }) : t('log.search.regex')}
               >
                 <Regex size={15} />
               </button>
@@ -4006,16 +4129,16 @@ function App() {
                     setFindBarOpen(false)
                   }
                 }}
-                placeholder="查找并高亮日志内容"
+                placeholder={t('log.search.findPlaceholder')}
                 value={activeTab.findText}
               />
-              <div className="search-option-group" aria-label="查找选项">
+              <div className="search-option-group" aria-label={t('log.search.findOptions')}>
                 <button
                   aria-label="Match Case"
                   aria-pressed={activeTab.findOptions.matchCase}
                   className={`search-option-button ${activeTab.findOptions.matchCase ? 'active-toggle' : ''}`}
                   onClick={() => toggleFindOption('matchCase')}
-                  title="Match Case"
+                  title={t('log.search.matchCase')}
                 >
                   <CaseSensitive size={15} />
                 </button>
@@ -4024,7 +4147,7 @@ function App() {
                   aria-pressed={activeTab.findOptions.wholeWords}
                   className={`search-option-button ${activeTab.findOptions.wholeWords ? 'active-toggle' : ''}`}
                   onClick={() => toggleFindOption('wholeWords')}
-                  title="Words"
+                  title={t('log.search.words')}
                 >
                   <WholeWord size={15} />
                 </button>
@@ -4035,7 +4158,7 @@ function App() {
                     activeFindMatcher.error ? 'invalid' : ''
                   }`}
                   onClick={() => toggleFindOption('regex')}
-                  title={activeFindMatcher.error ? `Regex 无效：${activeFindMatcher.error}` : 'Regex'}
+                  title={activeFindMatcher.error ? t('common.regexInvalid', { error: activeFindMatcher.error }) : t('log.search.regex')}
                 >
                   <Regex size={15} />
                 </button>
@@ -4045,7 +4168,7 @@ function App() {
               <X size={16} />
             </button>
             {activeFindMatcher.error ? (
-              <span className="find-error">Regex 无效：{activeFindMatcher.error}</span>
+              <span className="find-error">{t('common.regexInvalid', { error: activeFindMatcher.error })}</span>
             ) : null}
           </div>
         ) : null}
@@ -4058,12 +4181,13 @@ function App() {
             <div className="log-table">
               <div className="log-header">
                 {activeTab.visibleLogFields.map((field) => {
-                  const label = LOG_FIELD_OPTIONS.find((option) => option.value === field)?.label ?? field
+                  const option = LOG_FIELD_OPTIONS.find((item) => item.value === field)
+                  const label = option ? t(option.labelKey) : field
                   return (
                     <span className="log-header-cell" key={field}>
                       <span className="log-header-label">{label}</span>
                       <button
-                        aria-label={`调整${label}列宽`}
+                        aria-label={t('log.columns.resize', { label })}
                         className={`column-resizer ${resizingLogField === field ? 'active' : ''}`}
                         onPointerDown={(event) => beginResizeLogColumn(event, field)}
                         type="button"
@@ -4148,8 +4272,14 @@ function App() {
                 </div>
               ) : (
                 <div className="empty-state">
-                  <strong>{isRunning ? (activeTab.paused ? '已暂停' : '正在监听') : '等待日志输入'}</strong>
-                  <span>{isRunning ? '当前过滤条件下暂无日志。' : '连接设备后即可开始监听 logcat。'}</span>
+                  <strong>
+                    {isRunning
+                      ? activeTab.paused
+                        ? t('log.empty.paused')
+                        : t('log.empty.listening')
+                      : t('log.empty.waiting')}
+                  </strong>
+                  <span>{isRunning ? t('log.empty.noFiltered') : t('log.empty.connect')}</span>
                 </div>
               )}
             </div>
@@ -4164,7 +4294,7 @@ function App() {
           style={{ left: cellCopyMenu.x, top: cellCopyMenu.y }}
         >
           <button onClick={() => void copyCellText()} type="button">
-            复制{cellCopyMenu.label}
+            {t('common.copy', { label: cellCopyMenu.label })}
           </button>
         </div>
       ) : null}

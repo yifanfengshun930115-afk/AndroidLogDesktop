@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   buildAndroidStudioLogcatFile,
   parseAndroidStudioLogcatText,
   stringifyAndroidStudioLogcatFile,
 } from './androidStudioLogcat'
+import { applyLanguagePreference, translate } from './i18n'
 import { parseLogcatLine } from './logcat'
 
 describe('Android Studio logcat format', () => {
+  beforeEach(async () => {
+    await applyLanguagePreference('zh-CN')
+  })
+
   it('exports filtered entries as Android Studio JSON logcat messages', () => {
     const entry = parseLogcatLine(
       '07-24 17:11:59.489  1619  2231 D DemoTag: debug message',
@@ -99,7 +104,7 @@ describe('Android Studio logcat format', () => {
       'samsung-SM-G991B.logcat',
     )
 
-    expect(imported.title).toBe('导入 - samsung-SM-G991B')
+    expect(imported.title).toBe(translate('import.titleFromFile', { name: 'samsung-SM-G991B' }))
     expect(imported.deviceSerials).toEqual(['RFCR301L2JN'])
     expect(imported.devices[0]).toMatchObject({
       serial: 'RFCR301L2JN',
@@ -180,5 +185,35 @@ describe('Android Studio logcat format', () => {
       selectedLevels: ['I'],
       searchText: 'push ok',
     })
+  })
+
+  it('uses the selected language for imported tab titles', async () => {
+    await applyLanguagePreference('en-US')
+
+    const imported = parseAndroidStudioLogcatText(
+      stringifyAndroidStudioLogcatFile({
+        metadata: {
+          filter: '',
+          projectApplicationIds: [],
+        },
+        logcatMessages: [
+          {
+            header: {
+              logLevel: 'INFO',
+              pid: 0,
+              tid: 0,
+              applicationId: '',
+              processName: '',
+              tag: '',
+              timestamp: { seconds: 0, nanos: 0 },
+            },
+            message: '--------- beginning of main',
+          },
+        ],
+      }),
+      'demo.logcat',
+    )
+
+    expect(imported.title).toBe('Imported - demo')
   })
 })

@@ -6,6 +6,7 @@ import {
   timestampPartsFromEpochMs,
   type StructuredLogEntryInput,
 } from './logcat'
+import { translate } from './i18n'
 import type {
   AdbDevice,
   AndroidStudioLogcatFile,
@@ -237,9 +238,9 @@ export function stringifyAndroidStudioLogcatFile(file: AndroidStudioLogcatFile) 
 function importedTitle(fileName: string) {
   const trimmed = fileName.trim()
   if (!trimmed) {
-    return '导入日志'
+    return translate('import.defaultTitle')
   }
-  return `导入 - ${trimmed.replace(/\.(logcat|json)$/i, '')}`
+  return translate('import.titleFromFile', { name: trimmed.replace(/\.(logcat|json)$/i, '') })
 }
 
 function physicalDeviceFromMetadata(metadata: unknown) {
@@ -398,11 +399,11 @@ export function parseAndroidStudioLogcatText(text: string, fileName: string) {
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error('文件不是 Android Studio .logcat JSON 格式')
+    throw new Error(translate('import.invalidFormat'))
   }
 
   if (!isRecord(data) || !Array.isArray(data.logcatMessages)) {
-    throw new Error('文件缺少 logcatMessages，无法导入')
+    throw new Error(translate('import.missingMessages'))
   }
 
   const metadata = data.metadata
@@ -418,7 +419,7 @@ export function parseAndroidStudioLogcatText(text: string, fileName: string) {
   }
 
   if (entries.length === 0) {
-    throw new Error('文件中没有可导入的日志')
+    throw new Error(translate('import.empty'))
   }
 
   return {
