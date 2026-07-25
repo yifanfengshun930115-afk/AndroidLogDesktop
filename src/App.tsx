@@ -30,7 +30,7 @@ import {
   WrapText,
   X,
 } from 'lucide-react'
-import { emitTo, listen } from '@tauri-apps/api/event'
+import { emit, emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
@@ -138,6 +138,10 @@ interface TabTransferPayload {
   id: string
   title: string
   source?: LogTabSource
+  theme?: 'light' | 'dark'
+  logColorScheme?: LogColorScheme
+  logFontSize?: number
+  logRowPadding?: number
   selectedSerial?: string
   selectedSerials?: string[]
   importedDevices?: AdbDevice[]
@@ -164,6 +168,13 @@ interface TabTransferPayload {
 
 interface TabTransferEventPayload {
   transferId: string
+}
+
+interface AppearanceEventPayload {
+  theme: 'light' | 'dark'
+  logColorScheme: LogColorScheme
+  logFontSize: number
+  logRowPadding: number
 }
 
 interface InitialAppState {
@@ -294,6 +305,7 @@ const LOG_BOTTOM_OVERSCAN_ROWS = 500
 const DETACHED_TAB_QUERY_PARAM = 'detachedTab'
 const TAB_TRANSFER_SCHEMA_VERSION = 1
 const REATTACH_TAB_EVENT = 'tabs://reattach'
+const APPEARANCE_CHANGED_EVENT = 'appearance://changed'
 const APP_CLOSE_REQUESTED_EVENT = 'app://close-requested'
 const RELEASE_PAGE_URL = 'https://github.com/yifanfengshun930115-afk/AndroidLogDesktop/releases/latest'
 
@@ -459,6 +471,46 @@ function normalizeLogColorScheme(value: unknown): LogColorScheme {
   return value === 'idea' || value === 'vscode' ? value : 'android-studio'
 }
 
+function normalizeAppearancePayload(
+  payload: Partial<AppearanceEventPayload>,
+  fallback: AppearanceEventPayload = {
+    theme: 'light',
+    logColorScheme: 'android-studio',
+    logFontSize: DEFAULT_LOG_FONT_SIZE,
+    logRowPadding: DEFAULT_LOG_ROW_PADDING,
+  },
+): AppearanceEventPayload {
+  return {
+    theme: payload.theme ? normalizeTheme(payload.theme) : fallback.theme,
+    logColorScheme: payload.logColorScheme
+      ? normalizeLogColorScheme(payload.logColorScheme)
+      : fallback.logColorScheme,
+    logFontSize: clampNumber(
+      Number(payload.logFontSize ?? fallback.logFontSize),
+      LOG_FONT_SIZE_RANGE.min,
+      LOG_FONT_SIZE_RANGE.max,
+    ),
+    logRowPadding: clampNumber(
+      Number(payload.logRowPadding ?? fallback.logRowPadding),
+      LOG_ROW_PADDING_RANGE.min,
+      LOG_ROW_PADDING_RANGE.max,
+    ),
+  }
+}
+
+function appearanceFromTransferPayload(payload: TabTransferPayload) {
+  if (
+    !payload.theme &&
+    !payload.logColorScheme &&
+    typeof payload.logFontSize !== 'number' &&
+    typeof payload.logRowPadding !== 'number'
+  ) {
+    return undefined
+  }
+
+  return normalizeAppearancePayload(payload)
+}
+
 function normalizeLogLevels(value: unknown): LogLevel[] {
   const allowedLevels = new Set(LOG_LEVEL_OPTIONS.map((option) => option.value))
   return stringList(value).filter((level): level is LogLevel => allowedLevels.has(level as LogLevel))
@@ -587,6 +639,7 @@ function createLogTabFromPersistedState(state: PersistedLogTabState, index: numb
 
 function createInitialAppState(detachedTransferId: string): InitialAppState {
   if (detachedTransferId) {
+    const persistedState = readPersistedAppState()
     const tab = createDetachedPlaceholderTab(detachedTransferId)
     return {
       tabs: [tab],
@@ -594,20 +647,20 @@ function createInitialAppState(detachedTransferId: string): InitialAppState {
       nextTabIndex: 1,
       drawerOpen: false,
       findBarOpen: false,
-      logColorScheme: 'android-studio',
+      logColorScheme: persistedState?.logColorScheme ?? 'android-studio',
       logFontSize: readNumberPreference(
         LOG_FONT_SIZE_STORAGE_KEY,
-        DEFAULT_LOG_FONT_SIZE,
+        persistedState?.logFontSize ?? DEFAULT_LOG_FONT_SIZE,
         LOG_FONT_SIZE_RANGE.min,
         LOG_FONT_SIZE_RANGE.max,
       ),
       logRowPadding: readNumberPreference(
         LOG_ROW_PADDING_STORAGE_KEY,
-        DEFAULT_LOG_ROW_PADDING,
+        persistedState?.logRowPadding ?? DEFAULT_LOG_ROW_PADDING,
         LOG_ROW_PADDING_RANGE.min,
         LOG_ROW_PADDING_RANGE.max,
       ),
-      theme: 'light',
+      theme: persistedState?.theme ?? 'light',
     }
   }
 
@@ -674,12 +727,20 @@ function normalizeLogFields(fields: LogField[]) {
   return ALL_LOG_FIELDS.filter((field) => selected.has(field))
 }
 
-function serializeTabForTransfer(tab: LogTab, sessionRunning: boolean): TabTransferPayload {
+function serializeTabForTransfer(
+  tab: LogTab,
+  sessionRunning: boolean,
+  appearance: AppearanceEventPayload,
+): TabTransferPayload {
   return {
     schemaVersion: TAB_TRANSFER_SCHEMA_VERSION,
     id: tab.id,
     title: tab.title,
     source: tab.source,
+    theme: appearance.theme,
+    logColorScheme: appearance.logColorScheme,
+    logFontSize: appearance.logFontSize,
+    logRowPadding: appearance.logRowPadding,
     selectedSerial: tab.selectedSerials[0] ?? '',
     selectedSerials: [...tab.selectedSerials],
     importedDevices: tab.importedDevices.map((device) => ({ ...device })),
@@ -1268,6 +1329,7 @@ function App() {
   const [editingTabId, setEditingTabId] = useState('')
   const [editingTabTitle, setEditingTabTitle] = useState('')
   const [findBarOpen, setFindBarOpen] = useState(initialAppState.findBarOpen)
+  const [appearanceSyncReady, setAppearanceSyncReady] = useState(!isDetachedWindow)
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false)
   const [closingApp, setClosingApp] = useState(false)
   const [resizingLogField, setResizingLogField] = useState<LogField | ''>('')
@@ -1301,6 +1363,13 @@ function App() {
   const tagFilterRef = useRef<HTMLDivElement>(null)
   const contentFilterRef = useRef<HTMLDivElement>(null)
 
+  const applyAppearance = useCallback((appearance: AppearanceEventPayload) => {
+    setTheme(appearance.theme)
+    setLogColorScheme(appearance.logColorScheme)
+    setLogFontSize(appearance.logFontSize)
+    setLogRowPadding(appearance.logRowPadding)
+  }, [])
+
   useEffect(() => {
     tabsRef.current = tabs
   }, [tabs])
@@ -1324,13 +1393,19 @@ function App() {
         if (disposed) {
           return
         }
+        const appearance = appearanceFromTransferPayload(payload)
+        if (appearance) {
+          applyAppearance(appearance)
+        }
         setTabs([tab])
         setActiveTabId(tab.id)
         setDrawerOpen(false)
         nextTabIndexRef.current = nextLogcatIndex([tab])
+        setAppearanceSyncReady(true)
       } catch (error) {
         if (!disposed) {
           setLogError(error instanceof Error ? error.message : String(error))
+          setAppearanceSyncReady(true)
         }
       }
     }
@@ -1339,7 +1414,7 @@ function App() {
     return () => {
       disposed = true
     }
-  }, [detachedTransferId, isDetachedWindow])
+  }, [applyAppearance, detachedTransferId, isDetachedWindow])
 
   useEffect(() => {
     if (isDetachedWindow) {
@@ -1358,6 +1433,10 @@ function App() {
         }
         if (disposed) {
           return
+        }
+        const appearance = appearanceFromTransferPayload(payload)
+        if (appearance) {
+          applyAppearance(appearance)
         }
 
         setTabs((current) => {
@@ -1394,7 +1473,7 @@ function App() {
       disposed = true
       unlisten?.()
     }
-  }, [isDetachedWindow])
+  }, [applyAppearance, isDetachedWindow])
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]
   const activeStore = activeTab.store
@@ -1471,6 +1550,15 @@ function App() {
         '--log-row-padding': `${logRowPadding}px`,
       }) as CSSProperties,
     [activeTab.columnWidths, activeTab.softWrap, activeTab.visibleLogFields, logFontSize, logRowPadding],
+  )
+  const currentAppearance = useMemo(
+    () => ({
+      theme,
+      logColorScheme,
+      logFontSize,
+      logRowPadding,
+    }),
+    [logColorScheme, logFontSize, logRowPadding, theme],
   )
 
   const setActiveLogWindowStart = useCallback(
@@ -1692,6 +1780,40 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.logScheme = logColorScheme
   }, [logColorScheme])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    listen<AppearanceEventPayload>(APPEARANCE_CHANGED_EVENT, (event) => {
+      if (disposed) {
+        return
+      }
+      applyAppearance(normalizeAppearancePayload(event.payload))
+    })
+      .then((callback) => {
+        if (disposed) {
+          callback()
+          return
+        }
+        unlisten = callback
+      })
+      .catch((error) => {
+        setLogError(error instanceof Error ? error.message : String(error))
+      })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [applyAppearance])
+
+  useEffect(() => {
+    if (!appearanceSyncReady) {
+      return
+    }
+    void emit(APPEARANCE_CHANGED_EVENT, currentAppearance)
+  }, [appearanceSyncReady, currentAppearance])
 
   useEffect(() => {
     writeNumberPreference(LOG_FONT_SIZE_STORAGE_KEY, logFontSize)
@@ -2731,6 +2853,7 @@ function App() {
             paused: wasPaused,
           },
           wasRunning,
+          currentAppearance,
         )
         transferId = createTransferId('detached', tabId)
         await putTabTransfer(transferId, JSON.stringify(payload))
@@ -2755,7 +2878,7 @@ function App() {
         setDetachingTabId('')
       }
     },
-    [detachingTabId, isDetachedWindow, removeTabFromMain],
+    [currentAppearance, detachingTabId, isDetachedWindow, removeTabFromMain],
   )
 
   const returnTabToMain = useCallback(async () => {
@@ -2780,6 +2903,7 @@ function App() {
           paused: wasPaused,
         },
         wasRunning,
+        currentAppearance,
       )
       transferId = createTransferId('reattach', activeTab.id)
       await putTabTransfer(transferId, JSON.stringify(payload))
@@ -2792,7 +2916,7 @@ function App() {
       setLogError(error instanceof Error ? error.message : String(error))
       setReturningToMain(false)
     }
-  }, [activeTab, isDetachedWindow, returningToMain])
+  }, [activeTab, currentAppearance, isDetachedWindow, returningToMain])
 
   const handleTabDragStart = useCallback(
     (event: ReactDragEvent<HTMLDivElement>, tabId: string) => {

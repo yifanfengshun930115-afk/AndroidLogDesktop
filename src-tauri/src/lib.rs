@@ -54,6 +54,9 @@ pub fn run() {
         .manage(transfer::TabTransferState::default())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.unminimize();
                 let _ = window.show();
