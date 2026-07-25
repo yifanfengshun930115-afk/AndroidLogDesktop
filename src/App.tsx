@@ -3530,25 +3530,27 @@ function App() {
         </div>
 
         <header className="toolbar">
-          <div className="title-row">
-            <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
-              <Menu size={18} />
-            </button>
-            <div>
-              <h1>{activeTab.title}</h1>
-              <p>{selectedDeviceSummary(activeTab.selectedSerials, activeDeviceOptions)}</p>
+          <div className="toolbar-summary">
+            <div className="title-row">
+              <button className="icon-button" onClick={() => setDrawerOpen(true)} title="打开设备与筛选抽屉">
+                <Menu size={18} />
+              </button>
+              <div>
+                <h1 title={activeTab.title}>{activeTab.title}</h1>
+                <p>{selectedDeviceSummary(activeTab.selectedSerials, activeDeviceOptions)}</p>
+              </div>
             </div>
-          </div>
-          <div className="toolbar-metrics" aria-label="日志状态">
-            <span>
-              缓存 <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
-            </span>
-            <span>
-              筛选 <strong>{logSnapshot.filteredCount.toLocaleString()}</strong>
-            </span>
-            <span>
-              淘汰 <strong>{logSnapshot.droppedCount.toLocaleString()}</strong>
-            </span>
+            <div className="toolbar-metrics" aria-label="日志状态">
+              <span>
+                缓存 <strong>{logSnapshot.totalCount.toLocaleString()}</strong>
+              </span>
+              <span>
+                筛选 <strong>{logSnapshot.filteredCount.toLocaleString()}</strong>
+              </span>
+              <span>
+                淘汰 <strong>{logSnapshot.droppedCount.toLocaleString()}</strong>
+              </span>
+            </div>
           </div>
           <div className="toolbar-actions">
             {isDetachedWindow ? (
